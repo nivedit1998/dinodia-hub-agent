@@ -309,7 +309,7 @@ function pickBestLanIpv4FromSupervisorInfo(info) {
     const text = (() => {
       try { return JSON.stringify(info); } catch { return ""; }
     })();
-    const ips = text.match(/\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b/g) || [];
+    const ips = text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
     log("debug", "Fallback regex IPs", { ips });
     for (const ip of ips) {
       if (isBadLanCandidate(ip)) continue;
