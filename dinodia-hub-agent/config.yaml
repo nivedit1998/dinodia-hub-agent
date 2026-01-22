@@ -1,0 +1,70 @@
+name: Dinodia Hub Agent
+slug: dinodia-hub-agent
+version: "0.2.1"
+description: Local authenticated proxy/WS bridge to Home Assistant Core for Dinodia
+arch:
+  - aarch64
+  - amd64
+  - armv7
+startup: services
+boot: auto
+init: false
+
+homeassistant_api: true
+hassio_api: true
+
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: Dinodia Hub Agent HTTP/WS endpoint
+
+options:
+  port: 8099
+
+  hub_tokens: []
+  hub_token_hashes: []
+
+  ws_auth_mode: "supervisor"
+  ha_access_token: ""
+
+  allowed_path_regex:
+    - "^/api/?$"
+    - "^/api/states($|/.*)"
+    - "^/api/services/.*"
+    - "^/api/template$"
+    - "^/api/config.*"
+    - "^/api/camera_proxy/.*"
+    - "^/api/websocket$"
+
+  log_level: "info"
+
+  # Platform sync (disabled until platform endpoint exists)
+  platform_sync_enabled: false
+  platform_base_url: "https://app.dinodiasmartliving.com"
+  platform_token_state_endpoint: "/api/hub-agent/token-state"
+  platform_sync_interval_minutes: 60
+  hub_agent_id: ""
+  hub_agent_secret: ""
+
+schema:
+  port: int(1,65535)
+
+  hub_tokens:
+    - str?
+  hub_token_hashes:
+    - str?
+
+  ws_auth_mode: list(supervisor|ha|auto)
+  ha_access_token: str?
+
+  allowed_path_regex:
+    - str?
+
+  log_level: list(trace|debug|info|warn|error)
+
+  platform_sync_enabled: bool
+  platform_base_url: str?
+  platform_token_state_endpoint: str?
+  platform_sync_interval_minutes: int(5,1440)
+  hub_agent_id: str?
+  hub_agent_secret: str?

@@ -1,0 +1,2 @@
+#!/usr/bin/with-contenv sh
+exec node /opt/dinodia-hub-agent/server.js
