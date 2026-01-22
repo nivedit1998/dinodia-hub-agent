@@ -444,7 +444,7 @@ function schedulePlatformSyncLoop() {
   }
 
   const mins = Number(opts.platform_sync_interval_minutes);
-  const intervalMinutes = Number.isFinite(mins) && mins >= 5 ? mins : 5;
+  const intervalMinutes = Number.isFinite(mins) && mins >= 2 ? mins : 2;
 
   const loop = async () => {
     await syncFromPlatformOnce();

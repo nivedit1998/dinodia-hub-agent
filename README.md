@@ -15,7 +15,7 @@ Home Assistant add-on that provides an authenticated HTTP/WS bridge to HA Core f
 - `hub_agent_id`: the hub serial (from installer provisioning)
 - `hub_agent_secret`: bootstrap secret (from installer provisioning)
 - `platform_sync_enabled`: set `true` to enable platform token sync (default false)
-- `platform_sync_interval_minutes`: defaults to 5 (min 5)
+- `platform_sync_interval_minutes`: min 2 (default 60 unless you change it in the UI; jitter up to +60s per cycle)
 - `port`: default 8099 (HTTP/WS bridge)
 - `allowed_path_regex`: allowed HA API paths (defaults provided)
 - `ws_auth_mode`: `auto` (default), `supervisor`, or `ha`
