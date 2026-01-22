@@ -236,8 +236,7 @@ function looksLikeDockerRange(ip) {
   return (
     ip.startsWith("172.17.") ||
     ip.startsWith("172.18.") ||
-    ip.startsWith("172.19.") ||
-    ip.startsWith("172.30.")
+    ip.startsWith("172.19.")
   );
 }
 
@@ -324,12 +323,11 @@ function pickBestLanIpv4FromSupervisorInfo(info) {
     })();
     const ips = text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
     log("debug", "Fallback regex IPs", { ips });
-    for (const ip of ips) {
-      if (isBadLanCandidate(ip)) continue;
-      if (!isPrivateIpv4(ip)) continue;
+    const firstPrivate = ips.find((ip) => isPrivateIpv4(ip) && !isBadLanCandidate(ip));
+    if (firstPrivate) {
       candidates.push({
-        ip,
-        score: privateRank(ip) + (looksLikeDockerRange(ip) ? -5 : 0)
+        ip: firstPrivate,
+        score: privateRank(firstPrivate) + (looksLikeDockerRange(firstPrivate) ? -5 : 0)
       });
     }
   }

@@ -1,6 +1,6 @@
 name: Dinodia Hub Agent
 slug: dinodia-hub-agent
-version: "0.2.11"
+version: "0.2.13"
 description: Local authenticated proxy/WS bridge to Home Assistant Core for Dinodia
 arch:
   - aarch64
