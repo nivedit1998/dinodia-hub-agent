@@ -244,7 +244,8 @@ function looksLikeDockerRange(ip) {
 function collectIpv4Strings(value, out) {
   if (!value) return;
   if (typeof value === "string") {
-    if (isValidIpv4(value)) out.push(value);
+    const candidate = value.includes("/") ? value.split("/")[0].trim() : value.trim();
+    if (isValidIpv4(candidate)) out.push(candidate);
     return;
   }
   if (Array.isArray(value)) {
