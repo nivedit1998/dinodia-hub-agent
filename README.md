@@ -6,7 +6,7 @@ Home Assistant add-on that provides an authenticated HTTP/WS bridge to HA Core f
 1) Go to **Settings → Add-ons → Add-on Store**.
 2) Click the **⋮** menu → **Repositories** → add:
    ```
-   https://github.com/niveditgupta/dinodia-hub-agent
+   https://github.com/nivedit1998/dinodia-hub-agent
    ```
 3) Find **Dinodia Hub Agent** in the store, install, and start.
 
