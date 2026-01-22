@@ -290,6 +290,19 @@ function pickBestLanIpv4FromSupervisorInfo(info) {
         iface?.ipv4?.gateway
       );
 
+      // Prefer the first structured private IP immediately if present.
+      for (const ip of ips) {
+        if (isBadLanCandidate(ip)) continue;
+        if (!isPrivateIpv4(ip)) continue;
+        candidates.push({
+          ip,
+          score:
+            privateRank(ip) +
+            (hasGateway ? 100 : 0) +
+            (looksLikeDockerRange(ip) ? -5 : 0)
+        });
+      }
+
       for (const ip of ips) {
         if (isBadLanCandidate(ip)) continue;
         if (!isPrivateIpv4(ip)) continue;
