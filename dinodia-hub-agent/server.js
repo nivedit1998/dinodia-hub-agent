@@ -505,7 +505,7 @@ function proxyHttpToSupervisorCore(req, res) {
     return writeJson(res, 401, { error: "Unauthorized." });
   }
 
-  const upstreamUrl = new URL(clientPath.replace(/^\\/+/, "") + clientUrl.search, "http://supervisor/core/");
+  const upstreamUrl = new URL(clientPath.replace(/^\/+/, "") + clientUrl.search, "http://supervisor/core/");
 
   const upstreamHeaders = sanitizeHopByHopHeaders(req.headers);
   delete upstreamHeaders.host;
