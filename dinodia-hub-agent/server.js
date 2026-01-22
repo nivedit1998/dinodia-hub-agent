@@ -315,6 +315,7 @@ function pickBestLanIpv4FromSupervisorInfo(info) {
     }
   }
 
+  log("debug", "LAN candidate IPs", { candidates });
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => b.score - a.score);
   return candidates[0].ip;
@@ -338,13 +339,18 @@ async function getLanBaseUrlFromSupervisor() {
 
     const text = await res.text().catch(() => "");
     if (!res.ok) {
-      log("debug", "Supervisor network/info failed", { status: res.status, body: text.slice(0, 120) });
+      log("debug", "Supervisor network/info failed", { status: res.status, body: text.slice(0, 200) });
       return null;
     }
 
     let info;
     try { info = text ? JSON.parse(text) : null; } catch { info = null; }
     const ip = pickBestLanIpv4FromSupervisorInfo(info);
+    if (!ip) {
+      log("debug", "Supervisor network/info returned no usable IPv4", { raw: text.slice(0, 500) });
+    } else {
+      log("debug", "Supervisor network/info chose IPv4", { ip });
+    }
     if (!ip) return null;
 
     return `http://${ip}:8123`;
