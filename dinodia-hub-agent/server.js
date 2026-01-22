@@ -275,7 +275,6 @@ function pickBestLanIpv4FromSupervisorInfo(info) {
     if (Array.isArray(primaryAddr) && primaryAddr.length > 0) {
       const first = String(primaryAddr[0] || "").split("/")[0].trim();
       if (isValidIpv4(first)) {
-        log("debug", "Primary interface IPv4 chosen", { iface: primary?.interface, ip: first });
         return first;
       }
     }
@@ -289,8 +288,6 @@ function pickBestLanIpv4FromSupervisorInfo(info) {
       // Also look for nested arrays/objects
       collectIpv4Strings(iface?.ipv4?.address, ips);
       collectIpv4Strings(iface?.ipv4?.addresses, ips);
-
-      log("debug", "Structured IPv4 candidates", { iface: iface?.interface, ips });
 
       const hasGateway = Boolean(
         iface?.gateway ||
@@ -332,14 +329,12 @@ function pickBestLanIpv4FromSupervisorInfo(info) {
       try { return JSON.stringify(info); } catch { return ""; }
     })();
     const ips = text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
-    log("debug", "Fallback regex IPs", { ips });
     if (ips.length > 0) {
       // Ultra-simple: take the first match.
       return ips[0];
     }
   }
 
-  log("debug", "LAN candidate IPs", { candidates });
   if (candidates.length === 0) return null;
   candidates.sort((a, b) => b.score - a.score);
   return candidates[0].ip;
@@ -363,23 +358,16 @@ async function getLanBaseUrlFromSupervisor() {
 
     const text = await res.text().catch(() => "");
     if (!res.ok) {
-      log("debug", "Supervisor network/info failed", { status: res.status, body: text.slice(0, 200) });
       return null;
     }
 
     let info;
     try { info = text ? JSON.parse(text) : null; } catch { info = null; }
     const ip = pickBestLanIpv4FromSupervisorInfo(info);
-    if (!ip) {
-      log("debug", "Supervisor network/info returned no usable IPv4", { raw: text.slice(0, 500) });
-    } else {
-      log("debug", "Supervisor network/info chose IPv4", { ip });
-    }
     if (!ip) return null;
 
     return `http://${ip}:8123`;
   } catch (err) {
-    log("debug", "Supervisor network/info error", String(err && err.message ? err.message : err));
     return null;
   } finally {
     clearTimeout(timeout);
