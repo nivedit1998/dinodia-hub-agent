@@ -199,7 +199,7 @@ function isValidIpv4(ip) {
   const parts = String(ip || "").trim().split(".");
   if (parts.length !== 4) return false;
   for (const p of parts) {
-    if (!/^\\d+$/.test(p)) return false;
+    if (!/^\d+$/.test(p)) return false;
     const n = Number(p);
     if (!Number.isInteger(n) || n < 0 || n > 255) return false;
   }
@@ -270,6 +270,16 @@ function pickBestLanIpv4FromSupervisorInfo(info) {
   // Try structured interface parsing first
   const interfaces = info?.data?.interfaces || info?.interfaces;
   if (Array.isArray(interfaces)) {
+    const primary = interfaces.find((i) => i?.primary === true);
+    const primaryAddr = primary?.ipv4?.address;
+    if (Array.isArray(primaryAddr) && primaryAddr.length > 0) {
+      const first = String(primaryAddr[0] || "").split("/")[0].trim();
+      if (isValidIpv4(first)) {
+        log("debug", "Primary interface IPv4 chosen", { iface: primary?.interface, ip: first });
+        return first;
+      }
+    }
+
     for (const iface of interfaces) {
       const ips = [];
       collectIpv4Strings(iface?.ipv4, ips);
@@ -323,12 +333,9 @@ function pickBestLanIpv4FromSupervisorInfo(info) {
     })();
     const ips = text.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
     log("debug", "Fallback regex IPs", { ips });
-    const firstPrivate = ips.find((ip) => isPrivateIpv4(ip) && !isBadLanCandidate(ip));
-    if (firstPrivate) {
-      candidates.push({
-        ip: firstPrivate,
-        score: privateRank(firstPrivate) + (looksLikeDockerRange(firstPrivate) ? -5 : 0)
-      });
+    if (ips.length > 0) {
+      // Ultra-simple: take the first match.
+      return ips[0];
     }
   }
 
