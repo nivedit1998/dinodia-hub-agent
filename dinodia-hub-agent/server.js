@@ -281,6 +281,8 @@ function pickBestLanIpv4FromSupervisorInfo(info) {
       collectIpv4Strings(iface?.ipv4?.address, ips);
       collectIpv4Strings(iface?.ipv4?.addresses, ips);
 
+      log("debug", "Structured IPv4 candidates", { iface: iface?.interface, ips });
+
       const hasGateway = Boolean(
         iface?.gateway ||
         iface?.gateway_ipv4 ||
@@ -308,6 +310,7 @@ function pickBestLanIpv4FromSupervisorInfo(info) {
       try { return JSON.stringify(info); } catch { return ""; }
     })();
     const ips = text.match(/\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b/g) || [];
+    log("debug", "Fallback regex IPs", { ips });
     for (const ip of ips) {
       if (isBadLanCandidate(ip)) continue;
       if (!isPrivateIpv4(ip)) continue;
