@@ -255,6 +255,9 @@ function collectIpv4Strings(value, out) {
   if (typeof value === "object") {
     // common shapes
     if (typeof value.address === "string") collectIpv4Strings(value.address, out);
+    if (Array.isArray(value.address)) {
+      for (const v of value.address) collectIpv4Strings(v, out);
+    }
     if (typeof value.ip === "string") collectIpv4Strings(value.ip, out);
     if (typeof value.ip_address === "string") collectIpv4Strings(value.ip_address, out);
     if (typeof value.local_ip === "string") collectIpv4Strings(value.local_ip, out);
