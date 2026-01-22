@@ -557,7 +557,7 @@ const wss = new WebSocketServer({ noServer: true });
 server.on("upgrade", (req, socket, head) => {
   try {
     const url = new URL(req.url, "http://localhost");
-    const path = (url.pathname || "/").replace(/\\/{2,}/g, "/");
+    const path = (url.pathname || "/").replace(/\/{2,}/g, "/");
     if (path !== "/api/websocket") {
       socket.destroy();
       return;
