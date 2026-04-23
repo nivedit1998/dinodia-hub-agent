@@ -43,6 +43,7 @@ options:
   platform_base_url: "https://app.dinodiasmartliving.com"
   platform_token_state_endpoint: "/api/hub-agent/token-state"
   platform_sync_interval_minutes: 60
+  sync_status_token: ""
   hub_agent_id: ""
   hub_agent_secret: ""
 
@@ -66,5 +67,6 @@ schema:
   platform_base_url: str?
   platform_token_state_endpoint: str?
   platform_sync_interval_minutes: int(2,1440)
+  sync_status_token: str?
   hub_agent_id: str?
   hub_agent_secret: str?

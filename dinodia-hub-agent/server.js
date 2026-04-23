@@ -52,6 +52,7 @@ function loadOptions() {
     platform_base_url: "",
     platform_token_state_endpoint: DEFAULT_TOKEN_STATE_ENDPOINT,
     platform_sync_interval_minutes: 5,
+    sync_status_token: "",
     hub_agent_id: "",       // platform HubInstall.serial
     hub_agent_secret: ""    // bootstrap secret (printed/installer)
   };
@@ -93,6 +94,31 @@ function extractBearerTokenFromAuthHeader(value) {
   if (!value) return null;
   const m = String(value).match(/^Bearer\s+(.+)$/i);
   return m ? m[1].trim() : null;
+}
+
+function getHeaderStringValue(headers, key) {
+  const raw = headers && headers[key];
+  if (Array.isArray(raw)) return raw[0] ? String(raw[0]) : "";
+  return raw ? String(raw) : "";
+}
+
+function safeTokenEqual(a, b) {
+  const aBuf = Buffer.from(String(a || ""), "utf8");
+  const bBuf = Buffer.from(String(b || ""), "utf8");
+  if (aBuf.length === 0 || bBuf.length === 0 || aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
+
+function isSyncStatusAuthorized(req) {
+  const requiredToken = String(opts.sync_status_token || "").trim();
+  if (!requiredToken) return false; // disabled unless explicitly configured
+
+  const url = new URL(req.url || "/", "http://localhost");
+  const fromBearer = extractBearerTokenFromAuthHeader(getHeaderStringValue(req.headers, "authorization"));
+  const fromHeader = getHeaderStringValue(req.headers, "x-dinodia-sync-status-token").trim();
+  const fromQuery = (url.searchParams.get("token") || "").trim();
+  const presented = fromBearer || fromHeader || fromQuery;
+  return safeTokenEqual(requiredToken, presented);
 }
 
 let syncedTokenHashes = new Set();
@@ -447,10 +473,9 @@ async function syncFromPlatformOnce() {
       lastSyncAt: new Date().toISOString(),
       publishedVersion: Number.isFinite(data?.publishedVersion) ? Number(data.publishedVersion) : null,
       latestVersion: Number.isFinite(data?.latestVersion) ? Number(data.latestVersion) : null,
-      lanBaseUrl: lanBaseUrl || null
     });
 
-    log("info", "Platform sync updated tokens", { hashes: syncedTokenHashes.size, agentSeenVersion, lanBaseUrl: lanBaseUrl || null });
+    log("info", "Platform sync updated tokens", { hashes: syncedTokenHashes.size, agentSeenVersion });
   } catch (err) {
     log("warn", "Platform sync failed", String(err && err.message ? err.message : err));
   }
@@ -553,7 +578,11 @@ function proxyHttpToSupervisorCore(req, res) {
 
 const server = http.createServer((req, res) => {
   try {
-    if (req.method === "GET" && req.url === "/_dinodia/sync-status") {
+    const url = new URL(req.url || "/", "http://localhost");
+    if (req.method === "GET" && url.pathname === "/_dinodia/sync-status") {
+      if (!isSyncStatusAuthorized(req)) {
+        return writeJson(res, 404, { error: "Not found." });
+      }
       return writeJson(res, 200, {
         ok: true,
         platformSyncEnabled: Boolean(opts.platform_sync_enabled),
@@ -721,5 +750,5 @@ loadSyncedStateFromDisk();
 schedulePlatformSyncLoop();
 
 server.listen(opts.port, "0.0.0.0", () => {
-  log("info", `Listening on 0.0.0.0:${opts.port}`);
+  log("info", "Listening", { port: opts.port });
 });
