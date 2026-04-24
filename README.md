@@ -31,4 +31,5 @@ Home Assistant add-on that provides an authenticated HTTP/WS bridge to HA Core f
 - Architectures: `aarch64`, `amd64`, `armv7`
 - LAN reporting: the agent reports the detected LAN base URL to the platform (if platform sync is enabled).
 - Secure logging: info logs avoid LAN URL details; set `log_level: warn` for stricter output.
+- Local smoke testing: you can override add-on file paths with `DINODIA_OPTIONS_PATH` and `DINODIA_TOKEN_STATE_PATH` (defaults remain `/data/options.json` and `/data/dinodia_token_state.json`).
 # dinodia-hub-agent

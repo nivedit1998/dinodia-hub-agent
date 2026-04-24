@@ -4,8 +4,8 @@ const https = require("https");
 const crypto = require("crypto");
 const { WebSocketServer, WebSocket } = require("ws");
 
-const OPTIONS_PATH = "/data/options.json";
-const TOKEN_STATE_PATH = "/data/dinodia_token_state.json";
+const OPTIONS_PATH = process.env.DINODIA_OPTIONS_PATH || "/data/options.json";
+const TOKEN_STATE_PATH = process.env.DINODIA_TOKEN_STATE_PATH || "/data/dinodia_token_state.json";
 
 const DEFAULT_PAIR_ENDPOINT = "/api/hub-agent/pair";
 const DEFAULT_TOKEN_STATE_ENDPOINT = "/api/hub-agent/token-state";
