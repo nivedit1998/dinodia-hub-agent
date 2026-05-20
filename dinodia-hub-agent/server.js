@@ -784,6 +784,23 @@ function proxyHttpToSupervisorCore(req, res) {
   req.pipe(upstreamReq);
 }
 
+async function getStateFromSupervisor(entityId) {
+  const id = String(entityId || "").trim();
+  if (!id) return null;
+  if (!SUPERVISOR_TOKEN) return null;
+  try {
+    const url = `http://supervisor/core/api/states/${encodeURIComponent(id)}`;
+    const res = await fetch(url, {
+      method: "GET",
+      headers: { authorization: `Bearer ${SUPERVISOR_TOKEN}` },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 const server = http.createServer((req, res) => {
   try {
     const url = new URL(req.url || "/", "http://localhost");
@@ -1039,10 +1056,58 @@ function startHeatingUsageTracker() {
   }
 
   function startSubscriptions() {
-    refreshLabelEntityRegistryIfNeeded(true).catch(() => {});
-    // Subscribe to state changes (we filter locally by labeled entity id).
-    request("subscribe_events", { event_type: "state_changed" }).catch((err) => {
-      log("warn", "Heating usage subscribe_events failed", String(err && err.message ? err.message : err));
+    const kick = async () => {
+      await refreshLabelEntityRegistryIfNeeded(true);
+
+      // Seed current state once so platform tables populate immediately after install/upgrade,
+      // even before the first state_changed event arrives.
+      const initialEntries = Array.from(entityLabelById.entries());
+      if (initialEntries.length > 0) {
+        const CONCURRENCY = 4;
+        let idx = 0;
+
+        const worker = async () => {
+          while (idx < initialEntries.length) {
+            const cur = idx++;
+            const [entityId, label] = initialEntries[cur];
+
+            // Only seed entities that don't exist yet locally (avoids extra sends on restart).
+            const existing = heatingUsageState.entities && heatingUsageState.entities[entityId];
+            if (existing && typeof existing === "object") continue;
+
+            const state = await getStateFromSupervisor(entityId);
+            if (!state || typeof state !== "object") continue;
+
+            const observedAtIso =
+              typeof state.last_updated === "string" && state.last_updated ? state.last_updated :
+              typeof state.last_changed === "string" && state.last_changed ? state.last_changed :
+              new Date().toISOString();
+
+            const snapshot = extractHeatingSnapshot(state);
+            const processedSnapshot = {
+              state: snapshot.state,
+              hvac_mode: snapshot.hvac_mode,
+              current: snapshot.current,
+              target: snapshot.target,
+            };
+
+            const explicitOff = computeExplicitOff(snapshot.state, snapshot.attrs || {});
+            const isOnNow = computeIsOnNow({ current: snapshot.current, target: snapshot.target, explicitOff });
+
+            updateLocalAccumulator(entityId, label, observedAtIso, isOnNow, processedSnapshot);
+          }
+        };
+
+        await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+        log("info", "Heating usage seeded initial entity states", { entities: initialEntries.length });
+      }
+
+      // Subscribe to state changes (we filter locally by labeled entity id).
+      await request("subscribe_events", { event_type: "state_changed" });
+    };
+
+    kick().catch((err) => {
+      log("warn", "Heating usage startup failed", String(err && err.message ? err.message : err));
     });
 
     const refreshLoop = () => {
@@ -1089,11 +1154,11 @@ function startHeatingUsageTracker() {
         return;
       }
 
-      if (msg && msg.type === "auth_ok") {
-        upstreamAuthed = true;
-        startSubscriptions();
-        return;
-      }
+    if (msg && msg.type === "auth_ok") {
+      upstreamAuthed = true;
+      startSubscriptions();
+      return;
+    }
 
       if (msg && msg.type === "auth_invalid") {
         if (!upstreamAuthed && authAttemptIndex + 1 < upstreamAuthTokens.length) {
