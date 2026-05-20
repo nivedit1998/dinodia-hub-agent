@@ -1,6 +1,6 @@
 name: Dinodia Hub Agent
 slug: dinodia-hub-agent
-version: "0.3.1"
+version: "0.4.0"
 description: Local authenticated proxy/WS bridge to Home Assistant Core for Dinodia
 arch:
   - aarch64
@@ -42,10 +42,19 @@ options:
   platform_sync_enabled: false
   platform_base_url: "https://app.dinodiasmartliving.com"
   platform_token_state_endpoint: "/api/hub-agent/token-state"
-  platform_sync_interval_minutes: 60
+  platform_sync_interval_minutes: 2
   sync_status_token: ""
   hub_agent_id: ""
   hub_agent_secret: ""
+
+  heating_usage_tracking_enabled: true
+  heating_usage_tracking_labels:
+    - "Boiler"
+    - "Radiator"
+  heating_usage_persist_path: "/data/heating_usage_state.json"
+  heating_usage_max_tracked_entities: 200
+  heating_usage_min_process_interval_ms: 1000
+  heating_usage_label_refresh_minutes: 30
 
 schema:
   port: int(1,65535)
@@ -70,3 +79,11 @@ schema:
   sync_status_token: str?
   hub_agent_id: str?
   hub_agent_secret: str?
+
+  heating_usage_tracking_enabled: bool
+  heating_usage_tracking_labels:
+    - str?
+  heating_usage_persist_path: str?
+  heating_usage_max_tracked_entities: int(1,1000)
+  heating_usage_min_process_interval_ms: int(0,60000)
+  heating_usage_label_refresh_minutes: int(1,1440)
