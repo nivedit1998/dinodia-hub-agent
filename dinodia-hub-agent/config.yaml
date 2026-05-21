@@ -1,6 +1,6 @@
 name: Dinodia Hub Agent
 slug: dinodia-hub-agent
-version: "0.4.2"
+version: "0.4.3"
 description: Local authenticated proxy/WS bridge to Home Assistant Core for Dinodia
 arch:
   - aarch64
@@ -55,6 +55,7 @@ options:
   heating_usage_max_tracked_entities: 200
   heating_usage_min_process_interval_ms: 1000
   heating_usage_label_refresh_minutes: 30
+  heating_usage_gap_unknown_after_seconds: 600
 
 schema:
   port: int(1,65535)
@@ -87,3 +88,4 @@ schema:
   heating_usage_max_tracked_entities: int(1,1000)
   heating_usage_min_process_interval_ms: int(0,60000)
   heating_usage_label_refresh_minutes: int(1,1440)
+  heating_usage_gap_unknown_after_seconds: int(0,86400)

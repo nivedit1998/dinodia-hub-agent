@@ -63,6 +63,7 @@ function loadOptions() {
     heating_usage_max_tracked_entities: 200,
     heating_usage_min_process_interval_ms: 1000,
     heating_usage_label_refresh_minutes: 30,
+    heating_usage_gap_unknown_after_seconds: 600,
   };
 
   const parsed = loadJsonFile(OPTIONS_PATH);
@@ -220,15 +221,26 @@ function computeExplicitOff(state, attrs) {
   return hvac === "off";
 }
 
-function computeIsOnNow({ current, target, explicitOff }) {
-  // Explicit OFF must win even if temperature attributes are missing.
-  if (explicitOff) return false;
-  // If we can't compute demand, treat as OFF to avoid null lastWasOn in the platform DB.
-  if (target === null || current === null) return false;
-  return target > current;
+function classifyHeatingState({ state, attrs, current, target }) {
+  const s = String(state || "").trim().toLowerCase();
+  if (s === "unavailable" || s === "unknown") {
+    return { known: false, isOn: false };
+  }
+
+  const explicitOff = computeExplicitOff(state, attrs || {});
+  if (explicitOff) {
+    return { known: true, isOn: false };
+  }
+
+  if (current !== null && target !== null) {
+    return { known: true, isOn: target > current };
+  }
+
+  // Missing temperatures without an explicit OFF indicator is treated as UNKNOWN.
+  return { known: false, isOn: false };
 }
 
-function updateLocalAccumulator(entityId, label, observedAtIso, isOnNow, processedSnapshot) {
+function updateLocalAccumulator(entityId, label, observedAtIso, classification, processedSnapshot) {
   if (!opts.heating_usage_tracking_enabled) return;
 
   const entities = heatingUsageState.entities || {};
@@ -242,8 +254,10 @@ function updateLocalAccumulator(entityId, label, observedAtIso, isOnNow, process
       label,
       onSeconds: 0,
       offSeconds: 0,
+      unknownSeconds: 0,
       lastSeenAt: observedAt.toISOString(),
-      lastWasOn: isOnNow,
+      lastWasOn: classification && classification.isOn === true,
+      lastWasKnown: classification && classification.known === true,
       dirty: true,
       lastProcessed: processedSnapshot || null,
       lastProcessedAt: observedAt.toISOString(),
@@ -263,11 +277,28 @@ function updateLocalAccumulator(entityId, label, observedAtIso, isOnNow, process
 
   let onSeconds = safeClampInt(Number(existing.onSeconds || 0), 0, Number.MAX_SAFE_INTEGER) || 0;
   let offSeconds = safeClampInt(Number(existing.offSeconds || 0), 0, Number.MAX_SAFE_INTEGER) || 0;
+  let unknownSeconds = safeClampInt(Number(existing.unknownSeconds || 0), 0, Number.MAX_SAFE_INTEGER) || 0;
 
-  const lastWasOn = existing.lastWasOn === true ? true : existing.lastWasOn === false ? false : null;
+  const lastWasOn = existing.lastWasOn === true ? true : false;
+  const lastWasKnown = existing.lastWasKnown === true ? true : existing.lastWasKnown === false ? false : null;
+
   if (deltaSeconds > 0) {
-    if (lastWasOn === true) onSeconds += deltaSeconds;
-    else if (lastWasOn === false) offSeconds += deltaSeconds;
+    if (lastWasKnown === true) {
+      const gapAfterSecondsRaw = Number(opts.heating_usage_gap_unknown_after_seconds);
+      const gapAfterSeconds =
+        Number.isFinite(gapAfterSecondsRaw) && gapAfterSecondsRaw >= 0
+          ? Math.floor(gapAfterSecondsRaw)
+          : 600;
+      const allocateKnown = Math.min(deltaSeconds, gapAfterSeconds);
+      const allocateUnknown = Math.max(0, deltaSeconds - allocateKnown);
+
+      if (lastWasOn === true) onSeconds += allocateKnown;
+      else offSeconds += allocateKnown;
+      unknownSeconds += allocateUnknown;
+    } else {
+      // If the previous state was unknown (or we don't know), do not guess: allocate to UNKNOWN.
+      unknownSeconds += deltaSeconds;
+    }
   }
 
   const next = {
@@ -275,8 +306,10 @@ function updateLocalAccumulator(entityId, label, observedAtIso, isOnNow, process
     label,
     onSeconds,
     offSeconds,
+    unknownSeconds,
     lastSeenAt: observedAt.toISOString(),
-    lastWasOn: isOnNow,
+    lastWasOn: classification && classification.isOn === true,
+    lastWasKnown: classification && classification.known === true,
     dirty: true,
     lastProcessed: processedSnapshot || existing.lastProcessed || null,
     lastProcessedAt: observedAt.toISOString(),
@@ -300,8 +333,10 @@ function listDirtyHeatingUsageDevices(maxDevices = 100) {
       entityId,
       onSeconds: Number(entry.onSeconds || 0),
       offSeconds: Number(entry.offSeconds || 0),
+      unknownSeconds: Number(entry.unknownSeconds || 0),
       lastSeenAt: entry.lastSeenAt,
-      lastWasOn: entry.lastWasOn === true ? true : entry.lastWasOn === false ? false : null,
+      lastWasOn: entry.lastWasOn === true,
+      lastWasKnown: entry.lastWasKnown === true,
     });
     if (out.length >= maxDevices) break;
   }
@@ -1051,10 +1086,14 @@ function startHeatingUsageTracker() {
     const lastProcessed = existing && typeof existing === "object" ? existing.lastProcessed : null;
     if (isSameProcessedSnapshot(lastProcessed, processedSnapshot)) return;
 
-    const explicitOff = computeExplicitOff(snapshot.state, snapshot.attrs || {});
-    const isOnNow = computeIsOnNow({ current: snapshot.current, target: snapshot.target, explicitOff });
+    const classification = classifyHeatingState({
+      state: snapshot.state,
+      attrs: snapshot.attrs || {},
+      current: snapshot.current,
+      target: snapshot.target,
+    });
 
-    updateLocalAccumulator(entityId, label, observedAtIso, isOnNow, processedSnapshot);
+    updateLocalAccumulator(entityId, label, observedAtIso, classification, processedSnapshot);
   }
 
   function startSubscriptions() {
@@ -1077,7 +1116,14 @@ function startHeatingUsageTracker() {
             // Avoids unnecessary sends on every restart while still healing null lastWasOn values.
             const existing = heatingUsageState.entities && heatingUsageState.entities[entityId];
             const hasExisting = existing && typeof existing === "object";
-            const needsHeal = hasExisting && (existing.lastWasOn === null || existing.lastWasOn === undefined);
+            const needsHeal =
+              hasExisting &&
+              (existing.lastWasOn === null ||
+                existing.lastWasOn === undefined ||
+                existing.lastWasKnown === null ||
+                existing.lastWasKnown === undefined ||
+                existing.unknownSeconds === null ||
+                existing.unknownSeconds === undefined);
             if (hasExisting && !needsHeal) continue;
 
             const state = await getStateFromSupervisor(entityId);
@@ -1096,10 +1142,14 @@ function startHeatingUsageTracker() {
               target: snapshot.target,
             };
 
-            const explicitOff = computeExplicitOff(snapshot.state, snapshot.attrs || {});
-            const isOnNow = computeIsOnNow({ current: snapshot.current, target: snapshot.target, explicitOff });
+            const classification = classifyHeatingState({
+              state: snapshot.state,
+              attrs: snapshot.attrs || {},
+              current: snapshot.current,
+              target: snapshot.target,
+            });
 
-            updateLocalAccumulator(entityId, label, observedAtIso, isOnNow, processedSnapshot);
+            updateLocalAccumulator(entityId, label, observedAtIso, classification, processedSnapshot);
           }
         };
 
