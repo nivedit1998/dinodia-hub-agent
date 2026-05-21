@@ -221,8 +221,10 @@ function computeExplicitOff(state, attrs) {
 }
 
 function computeIsOnNow({ current, target, explicitOff }) {
-  if (target === null || current === null) return null;
+  // Explicit OFF must win even if temperature attributes are missing.
   if (explicitOff) return false;
+  // If we can't compute demand, treat as OFF to avoid null lastWasOn in the platform DB.
+  if (target === null || current === null) return false;
   return target > current;
 }
 
@@ -1071,9 +1073,12 @@ function startHeatingUsageTracker() {
             const cur = idx++;
             const [entityId, label] = initialEntries[cur];
 
-            // Only seed entities that don't exist yet locally (avoids extra sends on restart).
+            // Seed only when missing locally, or when lastWasOn is null (older versions could persist null when OFF).
+            // Avoids unnecessary sends on every restart while still healing null lastWasOn values.
             const existing = heatingUsageState.entities && heatingUsageState.entities[entityId];
-            if (existing && typeof existing === "object") continue;
+            const hasExisting = existing && typeof existing === "object";
+            const needsHeal = hasExisting && (existing.lastWasOn === null || existing.lastWasOn === undefined);
+            if (hasExisting && !needsHeal) continue;
 
             const state = await getStateFromSupervisor(entityId);
             if (!state || typeof state !== "object") continue;
