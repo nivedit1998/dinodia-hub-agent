@@ -139,7 +139,7 @@ const heatingUsageStatePath =
   String(HEATING_USAGE_STATE_PATH_ENV || opts.heating_usage_persist_path || "").trim() ||
   "/data/heating_usage_state.json";
 
-let heatingUsageState = { schemaVersion: HEATING_SCHEMA_VERSION, updatedAt: null, entities: {} };
+let heatingUsageState = { schemaVersion: HEATING_SCHEMA_VERSION, updatedAt: null, lastResetAt: null, entities: {} };
 let heatingUsagePersistTimer = null;
 
 function safeClampInt(n, min, max) {
@@ -164,11 +164,25 @@ function readHeatingUsageStateFromDisk() {
   heatingUsageState = {
     schemaVersion: HEATING_SCHEMA_VERSION,
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : null,
+    lastResetAt: typeof state.lastResetAt === "string" ? state.lastResetAt : null,
     entities
   };
 
   const count = Object.keys(heatingUsageState.entities || {}).length;
   log("info", "Loaded cached heating usage state", { entities: count, path: heatingUsageStatePath });
+}
+
+function resetHeatingUsageState(resetAtIso) {
+  if (!opts.heating_usage_tracking_enabled) return;
+  const iso = typeof resetAtIso === "string" && resetAtIso.trim() ? resetAtIso.trim() : new Date().toISOString();
+  heatingUsageState = {
+    schemaVersion: HEATING_SCHEMA_VERSION,
+    updatedAt: new Date().toISOString(),
+    lastResetAt: iso,
+    entities: {},
+  };
+  schedulePersistHeatingUsageState();
+  log("info", "Heating usage state reset applied", { resetAt: iso });
 }
 
 function schedulePersistHeatingUsageState() {
@@ -685,6 +699,10 @@ async function syncFromPlatformOnce() {
     const payload = { ...sign(serial, ss), agentSeenVersion };
     if (lanBaseUrl) payload.lanBaseUrl = lanBaseUrl;
 
+    if (heatingUsageState && typeof heatingUsageState.lastResetAt === "string" && heatingUsageState.lastResetAt.trim()) {
+      payload.heatingUsageResetAckAt = heatingUsageState.lastResetAt.trim();
+    }
+
     const dirtyDevices = listDirtyHeatingUsageDevices(100);
     if (dirtyDevices.length > 0) {
       payload.heatingUsage = {
@@ -695,6 +713,20 @@ async function syncFromPlatformOnce() {
     }
 
     const data = await postJson(url, payload);
+
+    const resetAt = data && typeof data.heatingUsageResetAt === "string" ? data.heatingUsageResetAt.trim() : "";
+    if (resetAt) {
+      const nextDate = new Date(resetAt);
+      const nextMs = nextDate.getTime();
+      if (Number.isFinite(nextMs)) {
+        const current =
+          heatingUsageState && typeof heatingUsageState.lastResetAt === "string" ? heatingUsageState.lastResetAt.trim() : "";
+        const currentMs = current ? new Date(current).getTime() : NaN;
+        if (!Number.isFinite(currentMs) || nextMs > currentMs) {
+          resetHeatingUsageState(resetAt);
+        }
+      }
+    }
 
     const hashes = Array.isArray(data?.hubTokenHashes) ? data.hubTokenHashes : [];
     const next = new Set();
