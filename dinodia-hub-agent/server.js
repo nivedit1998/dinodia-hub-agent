@@ -298,17 +298,8 @@ function updateLocalAccumulator(entityId, label, observedAtIso, classification, 
 
   if (deltaSeconds > 0) {
     if (lastWasKnown === true) {
-      const gapAfterSecondsRaw = Number(opts.heating_usage_gap_unknown_after_seconds);
-      const gapAfterSeconds =
-        Number.isFinite(gapAfterSecondsRaw) && gapAfterSecondsRaw >= 0
-          ? Math.floor(gapAfterSecondsRaw)
-          : 600;
-      const allocateKnown = Math.min(deltaSeconds, gapAfterSeconds);
-      const allocateUnknown = Math.max(0, deltaSeconds - allocateKnown);
-
-      if (lastWasOn === true) onSeconds += allocateKnown;
-      else offSeconds += allocateKnown;
-      unknownSeconds += allocateUnknown;
+      if (lastWasOn === true) onSeconds += deltaSeconds;
+      else offSeconds += deltaSeconds;
     } else {
       // If the previous state was unknown (or we don't know), do not guess: allocate to UNKNOWN.
       unknownSeconds += deltaSeconds;
