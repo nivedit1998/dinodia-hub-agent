@@ -2,6 +2,7 @@ const fs = require("fs");
 const http = require("http");
 const https = require("https");
 const crypto = require("crypto");
+const path = require("path");
 const { WebSocketServer, WebSocket } = require("ws");
 
 const OPTIONS_PATH = process.env.DINODIA_OPTIONS_PATH || "/data/options.json";
@@ -135,12 +136,81 @@ let syncedTokenHashes = new Set();
 let agentSeenVersion = 0;
 let syncSecret = "";
 
-const HEATING_SCHEMA_VERSION = 1;
+const HEATING_SCHEMA_VERSION = 2;
 const heatingUsageStatePath =
   String(HEATING_USAGE_STATE_PATH_ENV || opts.heating_usage_persist_path || "").trim() ||
   "/data/heating_usage_state.json";
 
-let heatingUsageState = { schemaVersion: HEATING_SCHEMA_VERSION, updatedAt: null, lastResetAt: null, entities: {} };
+const DEFAULT_EFFICIENCY_BAND = "B";
+const DEFAULT_EFFICIENCY_BANDS_VERSION = 1;
+const boilerBandsConfigPath = process.env.DINODIA_BOILER_BANDS_PATH || path.join(__dirname, "boiler_efficiency_bands.v1.json");
+
+function loadBoilerEfficiencyBandsConfig() {
+  const raw = loadJsonFile(boilerBandsConfigPath);
+  if (!raw || typeof raw !== "object") return null;
+  const version = Number(raw.version);
+  const bands = raw.bands && typeof raw.bands === "object" ? raw.bands : null;
+  if (!Number.isFinite(version) || !bands) return null;
+  return { version, bands };
+}
+
+const boilerBandsConfig = loadBoilerEfficiencyBandsConfig();
+
+function getBandRows(band) {
+  const b = String(band || "").trim().toUpperCase();
+  if (!/^[A-G]$/.test(b)) return null;
+  const bands = boilerBandsConfig && boilerBandsConfig.bands ? boilerBandsConfig.bands : null;
+  const rows = bands && bands[b];
+  return Array.isArray(rows) ? rows : null;
+}
+
+function getBandOutputFraction(band, idleGapSeconds) {
+  const rows = getBandRows(band);
+  const secs = Number.isFinite(idleGapSeconds) ? Math.max(0, Math.floor(idleGapSeconds)) : 0;
+  if (!rows || rows.length === 0) {
+    // Safe fallback: treat unknown config as 100% output.
+    return 1;
+  }
+
+  for (const row of rows) {
+    if (!row || typeof row !== "object") continue;
+    const maxIdleSeconds = Number(row.maxIdleSeconds);
+    const outputPercent = Number(row.outputPercent);
+    if (!Number.isFinite(maxIdleSeconds) || !Number.isFinite(outputPercent)) continue;
+    if (secs <= Math.floor(maxIdleSeconds)) {
+      return Math.min(1, Math.max(0, outputPercent / 100));
+    }
+  }
+
+  const last = rows[rows.length - 1];
+  const outputPercent = last && typeof last === "object" ? Number(last.outputPercent) : 100;
+  return Math.min(1, Math.max(0, (Number.isFinite(outputPercent) ? outputPercent : 100) / 100));
+}
+
+function getBandHotMaintainingFraction(band) {
+  const rows = getBandRows(band);
+  if (!rows || rows.length === 0) return 1;
+  const first = rows[0];
+  const outputPercent = first && typeof first === "object" ? Number(first.outputPercent) : 100;
+  return Math.min(1, Math.max(0, (Number.isFinite(outputPercent) ? outputPercent : 100) / 100));
+}
+
+function normalizeBand(value) {
+  const b = String(value || "").trim().toUpperCase();
+  return /^[A-G]$/.test(b) ? b : null;
+}
+
+let heatingUsageState = {
+  schemaVersion: HEATING_SCHEMA_VERSION,
+  updatedAt: null,
+  lastResetAt: null,
+  config: {
+    efficiencyBandsVersion: boilerBandsConfig && Number.isFinite(boilerBandsConfig.version) ? boilerBandsConfig.version : DEFAULT_EFFICIENCY_BANDS_VERSION,
+    defaultBoilerEfficiencyBand: DEFAULT_EFFICIENCY_BAND,
+    boilerBandsByEntityId: {},
+  },
+  entities: {},
+};
 let heatingUsagePersistTimer = null;
 
 function safeClampInt(n, min, max) {
@@ -162,10 +232,20 @@ function readHeatingUsageStateFromDisk() {
   const entities = state.entities && typeof state.entities === "object" ? state.entities : null;
   if (!entities) return;
 
+  const config =
+    state.config && typeof state.config === "object"
+      ? state.config
+      : {
+          efficiencyBandsVersion: boilerBandsConfig && Number.isFinite(boilerBandsConfig.version) ? boilerBandsConfig.version : DEFAULT_EFFICIENCY_BANDS_VERSION,
+          defaultBoilerEfficiencyBand: DEFAULT_EFFICIENCY_BAND,
+          boilerBandsByEntityId: {},
+        };
+
   heatingUsageState = {
     schemaVersion: HEATING_SCHEMA_VERSION,
     updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : null,
     lastResetAt: typeof state.lastResetAt === "string" ? state.lastResetAt : null,
+    config,
     entities
   };
 
@@ -176,10 +256,19 @@ function readHeatingUsageStateFromDisk() {
 function resetHeatingUsageState(resetAtIso) {
   if (!opts.heating_usage_tracking_enabled) return;
   const iso = typeof resetAtIso === "string" && resetAtIso.trim() ? resetAtIso.trim() : new Date().toISOString();
+  const existingConfig =
+    heatingUsageState && heatingUsageState.config && typeof heatingUsageState.config === "object"
+      ? heatingUsageState.config
+      : {
+          efficiencyBandsVersion: boilerBandsConfig && Number.isFinite(boilerBandsConfig.version) ? boilerBandsConfig.version : DEFAULT_EFFICIENCY_BANDS_VERSION,
+          defaultBoilerEfficiencyBand: DEFAULT_EFFICIENCY_BAND,
+          boilerBandsByEntityId: {},
+        };
   heatingUsageState = {
     schemaVersion: HEATING_SCHEMA_VERSION,
     updatedAt: new Date().toISOString(),
     lastResetAt: iso,
+    config: existingConfig,
     entities: {},
   };
   schedulePersistHeatingUsageState();
@@ -265,11 +354,25 @@ function updateLocalAccumulator(entityId, label, observedAtIso, classification, 
   if (Number.isNaN(observedAt.getTime())) return;
 
   if (!existing) {
+    const config = heatingUsageState && heatingUsageState.config && typeof heatingUsageState.config === "object" ? heatingUsageState.config : null;
+    const configBands = config && config.boilerBandsByEntityId && typeof config.boilerBandsByEntityId === "object" ? config.boilerBandsByEntityId : {};
+    const bandFromConfig = configBands && typeof configBands[entityId] === "string" ? configBands[entityId] : null;
+    const defaultBand = config && typeof config.defaultBoilerEfficiencyBand === "string" ? config.defaultBoilerEfficiencyBand : DEFAULT_EFFICIENCY_BAND;
+    const efficiencyBand = normalizeBand(bandFromConfig) || normalizeBand(defaultBand) || DEFAULT_EFFICIENCY_BAND;
+    const efficiencyBandVersion = config && Number.isFinite(Number(config.efficiencyBandsVersion)) ? Number(config.efficiencyBandsVersion) : DEFAULT_EFFICIENCY_BANDS_VERSION;
+
     entities[entityId] = {
       label,
       onSeconds: 0,
       offSeconds: 0,
       unknownSeconds: 0,
+      efficiencyWeightedOnSeconds: label === "Boiler" ? 0 : undefined,
+      efficiencyOnSeconds: label === "Boiler" ? 0 : undefined,
+      efficiencyBand: label === "Boiler" ? efficiencyBand : undefined,
+      efficiencyBandVersion: label === "Boiler" ? efficiencyBandVersion : undefined,
+      lastHeatEndAt: label === "Boiler" ? null : undefined,
+      heatRunStartedAt: label === "Boiler" ? null : undefined,
+      heatRunStartOutputFraction: label === "Boiler" ? null : undefined,
       lastSeenAt: observedAt.toISOString(),
       lastWasOn: classification && classification.isOn === true,
       lastWasKnown: classification && classification.known === true,
@@ -297,13 +400,79 @@ function updateLocalAccumulator(entityId, label, observedAtIso, classification, 
   const lastWasOn = existing.lastWasOn === true ? true : false;
   const lastWasKnown = existing.lastWasKnown === true ? true : existing.lastWasKnown === false ? false : null;
 
+  const config = heatingUsageState && heatingUsageState.config && typeof heatingUsageState.config === "object" ? heatingUsageState.config : null;
+  const configBands = config && config.boilerBandsByEntityId && typeof config.boilerBandsByEntityId === "object" ? config.boilerBandsByEntityId : {};
+  const bandFromConfig = configBands && typeof configBands[entityId] === "string" ? configBands[entityId] : null;
+  const defaultBand = config && typeof config.defaultBoilerEfficiencyBand === "string" ? config.defaultBoilerEfficiencyBand : DEFAULT_EFFICIENCY_BAND;
+  const effectiveBand =
+    normalizeBand(bandFromConfig) ||
+    normalizeBand(existing.efficiencyBand) ||
+    normalizeBand(defaultBand) ||
+    DEFAULT_EFFICIENCY_BAND;
+  const efficiencyBandVersion = config && Number.isFinite(Number(config.efficiencyBandsVersion)) ? Number(config.efficiencyBandsVersion) : DEFAULT_EFFICIENCY_BANDS_VERSION;
+
+  let efficiencyWeightedOnSeconds =
+    label === "Boiler"
+      ? Math.max(0, Number.isFinite(Number(existing.efficiencyWeightedOnSeconds)) ? Number(existing.efficiencyWeightedOnSeconds) : 0)
+      : 0;
+  let efficiencyOnSeconds =
+    label === "Boiler"
+      ? Math.max(0, safeClampInt(Number(existing.efficiencyOnSeconds || 0), 0, Number.MAX_SAFE_INTEGER) || 0)
+      : 0;
+
+  const prevHeatRunStartedAt = label === "Boiler" && typeof existing.heatRunStartedAt === "string" ? new Date(existing.heatRunStartedAt) : null;
+  const prevHeatRunStartOutputFraction = label === "Boiler" ? Number(existing.heatRunStartOutputFraction) : NaN;
+  const prevLastHeatEndAt = label === "Boiler" && typeof existing.lastHeatEndAt === "string" ? new Date(existing.lastHeatEndAt) : null;
+
   if (deltaSeconds > 0) {
     if (lastWasKnown === true) {
-      if (lastWasOn === true) onSeconds += deltaSeconds;
-      else offSeconds += deltaSeconds;
+      if (lastWasOn === true) {
+        onSeconds += deltaSeconds;
+        if (label === "Boiler") {
+          // Thermal-state modulation: use run-start fraction for first 15 minutes, then hot-maintaining fraction.
+          let outputFraction = null;
+          const runStartMs = prevHeatRunStartedAt && !Number.isNaN(prevHeatRunStartedAt.getTime()) ? prevHeatRunStartedAt.getTime() : null;
+          const nowMs2 = observedAt.getTime();
+          if (runStartMs !== null && nowMs2 - runStartMs <= 15 * 60 * 1000 && Number.isFinite(prevHeatRunStartOutputFraction)) {
+            outputFraction = prevHeatRunStartOutputFraction;
+          } else {
+            outputFraction = getBandHotMaintainingFraction(effectiveBand);
+          }
+          efficiencyWeightedOnSeconds += deltaSeconds * outputFraction;
+          efficiencyOnSeconds += deltaSeconds;
+        }
+      } else {
+        offSeconds += deltaSeconds;
+      }
     } else {
       // If the previous state was unknown (or we don't know), do not guess: allocate to UNKNOWN.
       unknownSeconds += deltaSeconds;
+    }
+  }
+
+  // Detect transitions for boilers to track idle gaps.
+  const nextKnown = classification && classification.known === true;
+  const nextIsOn = classification && classification.isOn === true;
+  const prevKnown = lastWasKnown === true;
+
+  let lastHeatEndAtIso = label === "Boiler" && prevLastHeatEndAt && !Number.isNaN(prevLastHeatEndAt.getTime()) ? prevLastHeatEndAt.toISOString() : null;
+  let heatRunStartedAtIso = label === "Boiler" && prevHeatRunStartedAt && !Number.isNaN(prevHeatRunStartedAt.getTime()) ? prevHeatRunStartedAt.toISOString() : null;
+  let heatRunStartOutputFraction = label === "Boiler" && Number.isFinite(prevHeatRunStartOutputFraction) ? prevHeatRunStartOutputFraction : null;
+
+  if (label === "Boiler" && prevKnown && nextKnown) {
+    if (lastWasOn === false && nextIsOn === true) {
+      // OFF -> ON
+      const idleGapSeconds =
+        prevLastHeatEndAt && !Number.isNaN(prevLastHeatEndAt.getTime())
+          ? Math.max(0, Math.floor((observedAt.getTime() - prevLastHeatEndAt.getTime()) / 1000))
+          : 60 * 24 * 60 * 60; // treat unknown as seasonal cold start
+      heatRunStartedAtIso = observedAt.toISOString();
+      heatRunStartOutputFraction = getBandOutputFraction(effectiveBand, idleGapSeconds);
+    } else if (lastWasOn === true && nextIsOn === false) {
+      // ON -> OFF
+      lastHeatEndAtIso = observedAt.toISOString();
+      heatRunStartedAtIso = null;
+      heatRunStartOutputFraction = null;
     }
   }
 
@@ -313,6 +482,17 @@ function updateLocalAccumulator(entityId, label, observedAtIso, classification, 
     onSeconds,
     offSeconds,
     unknownSeconds,
+    ...(label === "Boiler"
+      ? {
+          efficiencyWeightedOnSeconds,
+          efficiencyOnSeconds,
+          efficiencyBand: effectiveBand,
+          efficiencyBandVersion,
+          lastHeatEndAt: lastHeatEndAtIso,
+          heatRunStartedAt: heatRunStartedAtIso,
+          heatRunStartOutputFraction,
+        }
+      : {}),
     lastSeenAt: observedAt.toISOString(),
     lastWasOn: classification && classification.isOn === true,
     lastWasKnown: classification && classification.known === true,
@@ -334,7 +514,7 @@ function listDirtyHeatingUsageDevices(maxDevices = 100) {
     if (!entry || typeof entry !== "object") continue;
     if (!entry.dirty) continue;
     if (!entry.label || !entry.lastSeenAt) continue;
-    out.push({
+    const base = {
       label: entry.label,
       entityId,
       onSeconds: Number(entry.onSeconds || 0),
@@ -343,7 +523,20 @@ function listDirtyHeatingUsageDevices(maxDevices = 100) {
       lastSeenAt: entry.lastSeenAt,
       lastWasOn: entry.lastWasOn === true,
       lastWasKnown: entry.lastWasKnown === true,
-    });
+    };
+
+    if (entry.label === "Boiler") {
+      const band = normalizeBand(entry.efficiencyBand) || (heatingUsageState.config && normalizeBand(heatingUsageState.config.defaultBoilerEfficiencyBand)) || DEFAULT_EFFICIENCY_BAND;
+      out.push({
+        ...base,
+        efficiencyWeightedOnSeconds: Number.isFinite(Number(entry.efficiencyWeightedOnSeconds)) ? Number(entry.efficiencyWeightedOnSeconds) : 0,
+        efficiencyOnSeconds: Number.isFinite(Number(entry.efficiencyOnSeconds)) ? Math.max(0, Math.floor(Number(entry.efficiencyOnSeconds))) : 0,
+        efficiencyBand: band,
+        efficiencyBandVersion: Number.isFinite(Number(entry.efficiencyBandVersion)) ? Math.floor(Number(entry.efficiencyBandVersion)) : (heatingUsageState.config && Number.isFinite(Number(heatingUsageState.config.efficiencyBandsVersion)) ? Math.floor(Number(heatingUsageState.config.efficiencyBandsVersion)) : DEFAULT_EFFICIENCY_BANDS_VERSION),
+      });
+    } else {
+      out.push(base);
+    }
     if (out.length >= maxDevices) break;
   }
   return out;
@@ -705,6 +898,36 @@ async function syncFromPlatformOnce() {
     }
 
     const data = await postJson(url, payload);
+
+    // Phase 12: receive boiler efficiency band config from the platform.
+    try {
+      const cfg = data && typeof data.heatingUsageConfig === "object" ? data.heatingUsageConfig : null;
+      if (cfg) {
+        const bandsVersion = Number(cfg.efficiencyBandsVersion);
+        const defaultBand = normalizeBand(cfg.defaultBoilerEfficiencyBand) || DEFAULT_EFFICIENCY_BAND;
+        const boilerBandsByEntityId = cfg.boilerBandsByEntityId && typeof cfg.boilerBandsByEntityId === "object" ? cfg.boilerBandsByEntityId : {};
+        const nextMap = {};
+        for (const [eid, bandRaw] of Object.entries(boilerBandsByEntityId)) {
+          const b = normalizeBand(bandRaw);
+          if (typeof eid === "string" && eid.trim() && b) nextMap[eid.trim()] = b;
+        }
+
+        if (!heatingUsageState.config || typeof heatingUsageState.config !== "object") {
+          heatingUsageState.config = {
+            efficiencyBandsVersion: Number.isFinite(bandsVersion) ? Math.floor(bandsVersion) : DEFAULT_EFFICIENCY_BANDS_VERSION,
+            defaultBoilerEfficiencyBand: defaultBand,
+            boilerBandsByEntityId: nextMap,
+          };
+        } else {
+          heatingUsageState.config.efficiencyBandsVersion = Number.isFinite(bandsVersion) ? Math.floor(bandsVersion) : heatingUsageState.config.efficiencyBandsVersion;
+          heatingUsageState.config.defaultBoilerEfficiencyBand = defaultBand;
+          heatingUsageState.config.boilerBandsByEntityId = nextMap;
+        }
+        schedulePersistHeatingUsageState();
+      }
+    } catch (err) {
+      log("warn", "Heating usage config update failed", String(err && err.message ? err.message : err));
+    }
 
     const resetAt = data && typeof data.heatingUsageResetAt === "string" ? data.heatingUsageResetAt.trim() : "";
     if (resetAt) {

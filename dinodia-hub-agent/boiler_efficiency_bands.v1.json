@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "bands": {
+    "G": [
+      { "maxIdleSeconds": 900, "state": "Hot maintaining", "outputPercent": 35 },
+      { "maxIdleSeconds": 3600, "state": "Warm maintaining", "outputPercent": 55 },
+      { "maxIdleSeconds": 14400, "state": "Mild reheat", "outputPercent": 75 },
+      { "maxIdleSeconds": 43200, "state": "Cold reheat", "outputPercent": 90 },
+      { "maxIdleSeconds": 172800, "state": "Cold start", "outputPercent": 100 },
+      { "maxIdleSeconds": 432000, "state": "Deep cold start", "outputPercent": 100 },
+      { "maxIdleSeconds": 5184000, "state": "Seasonal cold start", "outputPercent": 100 }
+    ],
+    "F": [
+      { "maxIdleSeconds": 900, "state": "Hot maintaining", "outputPercent": 30 },
+      { "maxIdleSeconds": 3600, "state": "Warm maintaining", "outputPercent": 50 },
+      { "maxIdleSeconds": 14400, "state": "Mild reheat", "outputPercent": 70 },
+      { "maxIdleSeconds": 43200, "state": "Cold reheat", "outputPercent": 85 },
+      { "maxIdleSeconds": 172800, "state": "Cold start", "outputPercent": 98 },
+      { "maxIdleSeconds": 432000, "state": "Deep cold start", "outputPercent": 100 },
+      { "maxIdleSeconds": 5184000, "state": "Seasonal cold start", "outputPercent": 100 }
+    ],
+    "E": [
+      { "maxIdleSeconds": 900, "state": "Hot maintaining", "outputPercent": 28 },
+      { "maxIdleSeconds": 3600, "state": "Warm maintaining", "outputPercent": 45 },
+      { "maxIdleSeconds": 14400, "state": "Mild reheat", "outputPercent": 65 },
+      { "maxIdleSeconds": 43200, "state": "Cold reheat", "outputPercent": 82 },
+      { "maxIdleSeconds": 172800, "state": "Cold start", "outputPercent": 96 },
+      { "maxIdleSeconds": 432000, "state": "Deep cold start", "outputPercent": 100 },
+      { "maxIdleSeconds": 5184000, "state": "Seasonal cold start", "outputPercent": 100 }
+    ],
+    "D": [
+      { "maxIdleSeconds": 900, "state": "Hot maintaining", "outputPercent": 22 },
+      { "maxIdleSeconds": 3600, "state": "Warm maintaining", "outputPercent": 38 },
+      { "maxIdleSeconds": 14400, "state": "Mild reheat", "outputPercent": 58 },
+      { "maxIdleSeconds": 43200, "state": "Cold reheat", "outputPercent": 78 },
+      { "maxIdleSeconds": 172800, "state": "Cold start", "outputPercent": 94 },
+      { "maxIdleSeconds": 432000, "state": "Deep cold start", "outputPercent": 100 },
+      { "maxIdleSeconds": 5184000, "state": "Seasonal cold start", "outputPercent": 100 }
+    ],
+    "C": [
+      { "maxIdleSeconds": 900, "state": "Hot maintaining", "outputPercent": 18 },
+      { "maxIdleSeconds": 3600, "state": "Warm maintaining", "outputPercent": 30 },
+      { "maxIdleSeconds": 14400, "state": "Mild reheat", "outputPercent": 48 },
+      { "maxIdleSeconds": 43200, "state": "Cold reheat", "outputPercent": 68 },
+      { "maxIdleSeconds": 172800, "state": "Cold start", "outputPercent": 88 },
+      { "maxIdleSeconds": 432000, "state": "Deep cold start", "outputPercent": 98 },
+      { "maxIdleSeconds": 5184000, "state": "Seasonal cold start", "outputPercent": 100 }
+    ],
+    "B": [
+      { "maxIdleSeconds": 900, "state": "Hot maintaining", "outputPercent": 14 },
+      { "maxIdleSeconds": 3600, "state": "Warm maintaining", "outputPercent": 24 },
+      { "maxIdleSeconds": 14400, "state": "Mild reheat", "outputPercent": 38 },
+      { "maxIdleSeconds": 43200, "state": "Cold reheat", "outputPercent": 58 },
+      { "maxIdleSeconds": 172800, "state": "Cold start", "outputPercent": 80 },
+      { "maxIdleSeconds": 432000, "state": "Deep cold start", "outputPercent": 94 },
+      { "maxIdleSeconds": 5184000, "state": "Seasonal cold start", "outputPercent": 100 }
+    ],
+    "A": [
+      { "maxIdleSeconds": 900, "state": "Hot maintaining", "outputPercent": 10 },
+      { "maxIdleSeconds": 3600, "state": "Warm maintaining", "outputPercent": 18 },
+      { "maxIdleSeconds": 14400, "state": "Mild reheat", "outputPercent": 30 },
+      { "maxIdleSeconds": 43200, "state": "Cold reheat", "outputPercent": 50 },
+      { "maxIdleSeconds": 172800, "state": "Cold start", "outputPercent": 70 },
+      { "maxIdleSeconds": 432000, "state": "Deep cold start", "outputPercent": 90 },
+      { "maxIdleSeconds": 5184000, "state": "Seasonal cold start", "outputPercent": 100 }
+    ]
+  }
+}
+
