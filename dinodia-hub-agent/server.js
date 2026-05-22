@@ -64,6 +64,7 @@ function loadOptions() {
     heating_usage_min_process_interval_ms: 1000,
     heating_usage_label_refresh_minutes: 30,
     heating_usage_gap_unknown_after_seconds: 600,
+    heating_usage_poll_interval_seconds: 300,
   };
 
   const parsed = loadJsonFile(OPTIONS_PATH);
@@ -925,6 +926,9 @@ function startHeatingUsageTracker() {
   const minProcessIntervalMs = Number.isFinite(minProcMs) && minProcMs >= 0 ? Math.floor(minProcMs) : 1000;
   const refreshMins = Number(opts.heating_usage_label_refresh_minutes);
   const refreshEveryMs = (Number.isFinite(refreshMins) && refreshMins > 0 ? refreshMins : 30) * 60 * 1000;
+  const pollSecs = Number(opts.heating_usage_poll_interval_seconds);
+  const pollEveryMs = (Number.isFinite(pollSecs) ? Math.floor(pollSecs) : 300) * 1000;
+  const pollIntervalMs = Math.min(60 * 60 * 1000, Math.max(60 * 1000, pollEveryMs || 300 * 1000));
 
   const upstreamUrl = "ws://supervisor/core/api/websocket";
   const upstreamAuthTokens = pickUpstreamAuthTokens();
@@ -941,6 +945,8 @@ function startHeatingUsageTracker() {
   let entityLabelById = new Map(); // entity_id -> "Boiler" | "Radiator"
   const entityLastProcessedAtMs = new Map(); // entity_id -> epoch ms
   let lastRegistryRefreshAtMs = 0;
+  let pollTimer = null;
+  let pollInProgress = false;
 
   function clearPending(err) {
     for (const [id, p] of pending.entries()) {
@@ -1182,6 +1188,60 @@ function startHeatingUsageTracker() {
 
       // Subscribe to state changes (we filter locally by labeled entity id).
       await request("subscribe_events", { event_type: "state_changed" });
+
+      // Phase 10: poll labeled entities periodically so counters advance even when HA emits no state_changed events.
+      const schedulePoll = () => {
+        if (pollTimer) return;
+        const loop = async () => {
+          pollTimer = null;
+          if (!upstreamAuthed) return;
+          if (pollInProgress) {
+            schedulePoll();
+            return;
+          }
+          pollInProgress = true;
+          try {
+            const entries = Array.from(entityLabelById.entries());
+            if (entries.length === 0) return;
+
+            for (const [entityId, label] of entries) {
+              if (!upstreamAuthed) break;
+              const state = await getStateFromSupervisor(entityId);
+              if (!state || typeof state !== "object") continue;
+
+              // For polling we use "now" as the observation timestamp so time accrues even if HA's last_updated is old.
+              const observedAtIso = new Date().toISOString();
+
+              const snapshot = extractHeatingSnapshot(state);
+              const processedSnapshot = {
+                state: snapshot.state,
+                hvac_mode: snapshot.hvac_mode,
+                current: snapshot.current,
+                target: snapshot.target,
+              };
+
+              const classification = classifyHeatingState({
+                state: snapshot.state,
+                attrs: snapshot.attrs || {},
+                current: snapshot.current,
+                target: snapshot.target,
+              });
+
+              updateLocalAccumulator(entityId, label, observedAtIso, classification, processedSnapshot);
+            }
+          } catch (err) {
+            log("warn", "Heating usage poll loop failed", String(err && err.message ? err.message : err));
+          } finally {
+            pollInProgress = false;
+            schedulePoll();
+          }
+        };
+
+        pollTimer = setTimeout(loop, pollIntervalMs);
+        if (pollTimer && typeof pollTimer.unref === "function") pollTimer.unref();
+      };
+      schedulePoll();
+      log("info", "Heating usage poll scheduled", { everySeconds: Math.floor(pollIntervalMs / 1000) });
     };
 
     kick().catch((err) => {
@@ -1211,6 +1271,11 @@ function startHeatingUsageTracker() {
     upstreamAuthed = false;
     upstreamNeedsAuth = false;
     clearPending(new Error("HA WS disconnected"));
+    if (pollTimer) {
+      try { clearTimeout(pollTimer); } catch {}
+      pollTimer = null;
+    }
+    pollInProgress = false;
 
     try {
       ws = new WebSocket(upstreamUrl, {
@@ -1267,6 +1332,13 @@ function startHeatingUsageTracker() {
     });
 
     ws.on("close", () => {
+      upstreamAuthed = false;
+      upstreamNeedsAuth = false;
+      if (pollTimer) {
+        try { clearTimeout(pollTimer); } catch {}
+        pollTimer = null;
+      }
+      pollInProgress = false;
       scheduleReconnect();
     });
 
