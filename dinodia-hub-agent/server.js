@@ -66,6 +66,8 @@ function loadOptions() {
     heating_usage_label_refresh_minutes: 30,
     heating_usage_gap_unknown_after_seconds: 600,
     heating_usage_poll_interval_seconds: 300,
+
+    ha_area_snapshot_refresh_minutes: 10,
   };
 
   const parsed = loadJsonFile(OPTIONS_PATH);
@@ -865,6 +867,146 @@ async function ensurePaired() {
   return syncSecret;
 }
 
+let lastHaAreasSnapshot = null; // { schemaVersion, capturedAt, areas: [{areaId?, name}] }
+let lastHaAreasSnapshotAtMs = 0;
+
+function normalizeNonEmptyString(v) {
+  const s = typeof v === "string" ? v.trim() : "";
+  return s ? s : "";
+}
+
+async function fetchHaAreaRegistrySnapshotOnce() {
+  const upstreamUrl = "ws://supervisor/core/api/websocket";
+  const authTokens = pickUpstreamAuthTokens();
+  if (!authTokens || authTokens.length === 0) return null;
+
+  return await new Promise((resolve, reject) => {
+    const ws = new WebSocket(upstreamUrl);
+    let done = false;
+    let authed = false;
+    let authAttemptIndex = 0;
+    const requestId = 2100;
+
+    const timeout = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { ws.close(); } catch {}
+      reject(new Error("HA WS timeout fetching areas"));
+    }, 15000);
+
+    function finish(err, value) {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
+      try { ws.removeAllListeners(); } catch {}
+      try { ws.close(); } catch {}
+      if (err) reject(err);
+      else resolve(value);
+    }
+
+    function sendAuth() {
+      const token = authTokens[authAttemptIndex] || "";
+      if (!token) {
+        finish(new Error("No HA auth token available"), null);
+        return;
+      }
+      try {
+        ws.send(JSON.stringify({ type: "auth", access_token: token }));
+      } catch (err) {
+        finish(err, null);
+      }
+    }
+
+    function sendRequest() {
+      try {
+        ws.send(JSON.stringify({ id: requestId, type: "config/area_registry/list" }));
+      } catch (err) {
+        finish(err, null);
+      }
+    }
+
+    ws.on("message", (buf) => {
+      let msg;
+      try {
+        msg = JSON.parse(buf.toString());
+      } catch {
+        return;
+      }
+
+      if (!authed) {
+        if (msg && msg.type === "auth_required") {
+          sendAuth();
+          return;
+        }
+        if (msg && msg.type === "auth_ok") {
+          authed = true;
+          sendRequest();
+          return;
+        }
+        if (msg && msg.type === "auth_invalid") {
+          authAttemptIndex += 1;
+          if (authAttemptIndex >= authTokens.length) {
+            finish(new Error("HA WS auth failed"), null);
+          } else {
+            sendAuth();
+          }
+          return;
+        }
+        return;
+      }
+
+      if (msg && msg.type === "result" && msg.id === requestId) {
+        if (!msg.success) {
+          finish(new Error("HA WS request failed"), null);
+          return;
+        }
+        const list = Array.isArray(msg.result) ? msg.result : [];
+        const deduped = new Map();
+        for (const row of list.slice(0, 500)) {
+          if (!row || typeof row !== "object") continue;
+          const name = normalizeNonEmptyString(row.name);
+          if (!name) continue;
+          const areaId = normalizeNonEmptyString(row.area_id);
+          const key = name.toLowerCase();
+          if (!deduped.has(key)) deduped.set(key, areaId ? { areaId, name } : { name });
+        }
+        const areas = Array.from(deduped.values());
+        if (areas.length === 0) {
+          finish(null, null);
+          return;
+        }
+        finish(null, {
+          schemaVersion: 1,
+          capturedAt: new Date().toISOString(),
+          areas,
+        });
+      }
+    });
+
+    ws.on("error", (err) => finish(err, null));
+    ws.on("close", () => finish(new Error("HA websocket closed"), null));
+  });
+}
+
+async function getHaAreaRegistrySnapshotMaybe() {
+  const mins = Number(opts.ha_area_snapshot_refresh_minutes);
+  const refreshMs = (Number.isFinite(mins) && mins > 0 ? Math.floor(mins) : 10) * 60 * 1000;
+  const nowMs = Date.now();
+  if (lastHaAreasSnapshot && nowMs - lastHaAreasSnapshotAtMs < refreshMs) return lastHaAreasSnapshot;
+
+  try {
+    const snapshot = await fetchHaAreaRegistrySnapshotOnce();
+    if (snapshot) {
+      lastHaAreasSnapshot = snapshot;
+      lastHaAreasSnapshotAtMs = nowMs;
+    }
+  } catch (err) {
+    log("warn", "HA area snapshot fetch failed", String(err && err.message ? err.message : err));
+  }
+
+  return lastHaAreasSnapshot;
+}
+
 async function syncFromPlatformOnce() {
   if (!opts.platform_sync_enabled) return;
 
@@ -896,6 +1038,9 @@ async function syncFromPlatformOnce() {
         devices: dirtyDevices,
       };
     }
+
+    const haAreas = await getHaAreaRegistrySnapshotMaybe();
+    if (haAreas) payload.haAreas = haAreas;
 
     const data = await postJson(url, payload);
 
