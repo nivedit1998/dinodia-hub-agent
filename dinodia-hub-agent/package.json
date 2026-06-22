@@ -1,6 +1,6 @@
 {
   "name": "dinodia-hub-agent",
-  "version": "0.4.14",
+  "version": "0.4.15",
   "private": true,
   "type": "commonjs",
   "main": "server.js",
