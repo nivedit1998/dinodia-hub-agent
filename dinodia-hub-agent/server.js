@@ -1151,6 +1151,57 @@ function writeJson(res, status, obj) {
   res.end(body);
 }
 
+function extractHubTokenFromReq(req) {
+  return extractBearerTokenFromAuthHeader(req && req.headers ? req.headers.authorization : "");
+}
+
+function ensureHubAuthorized(req, res) {
+  const clientToken = extractHubTokenFromReq(req);
+  if (!isHubTokenValid(clientToken)) {
+    writeJson(res, 401, { error: "Unauthorized.", code: "unauthorized" });
+    return false;
+  }
+  return true;
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > 1024 * 1024) {
+        reject(new Error("Request body too large"));
+        try { req.destroy(); } catch {}
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on("end", () => {
+      if (chunks.length === 0) {
+        resolve({});
+        return;
+      }
+      try {
+        const text = Buffer.concat(chunks).toString("utf8").trim();
+        resolve(text ? JSON.parse(text) : {});
+      } catch {
+        reject(new Error("Invalid JSON body"));
+      }
+    });
+
+    req.on("error", reject);
+  });
+}
+
+function hubError(res, status, code, message, details) {
+  const payload = { error: message, code };
+  if (details) payload.details = details;
+  writeJson(res, status, payload);
+}
+
 function sanitizeHopByHopHeaders(headers) {
   const hopByHop = new Set([
     "connection",
@@ -1230,7 +1281,194 @@ async function getStateFromSupervisor(entityId) {
   }
 }
 
-const server = http.createServer((req, res) => {
+async function callHaServiceViaSupervisor(domain, service, data = {}) {
+  if (!SUPERVISOR_TOKEN) {
+    throw new Error("supervisor_token_missing");
+  }
+  const normalizedDomain = normalizeNonEmptyString(domain);
+  const normalizedService = normalizeNonEmptyString(service);
+  if (!normalizedDomain || !normalizedService) {
+    throw new Error("invalid_service");
+  }
+
+  const res = await fetch(`http://supervisor/core/api/services/${encodeURIComponent(normalizedDomain)}/${encodeURIComponent(normalizedService)}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${SUPERVISOR_TOKEN}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(data && typeof data === "object" ? data : {})
+  });
+
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    const trimmed = text.trim();
+    throw new Error(trimmed ? `ha_service_error:${res.status}:${trimmed}` : `ha_service_error:${res.status}`);
+  }
+
+  if (!text.trim()) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+async function callHaWebSocketCommand(command, timeoutMs = 15000) {
+  const upstreamUrl = "ws://supervisor/core/api/websocket";
+  const authTokens = pickUpstreamAuthTokens();
+  if (!authTokens || authTokens.length === 0) {
+    throw new Error("ha_ws_auth_missing");
+  }
+
+  return await new Promise((resolve, reject) => {
+    const ws = new WebSocket(upstreamUrl);
+    let done = false;
+    let authed = false;
+    let authAttemptIndex = 0;
+    const requestId = Math.floor(Date.now() % 1000000) + Math.floor(Math.random() * 1000);
+
+    const timeout = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { ws.close(); } catch {}
+      reject(new Error("ha_ws_timeout"));
+    }, timeoutMs);
+
+    function finish(err, value) {
+      if (done) return;
+      done = true;
+      clearTimeout(timeout);
+      try { ws.removeAllListeners(); } catch {}
+      try { ws.close(); } catch {}
+      if (err) reject(err);
+      else resolve(value);
+    }
+
+    function sendAuth() {
+      const token = authTokens[authAttemptIndex] || "";
+      if (!token) {
+        finish(new Error("ha_ws_auth_missing"), null);
+        return;
+      }
+      try {
+        ws.send(JSON.stringify({ type: "auth", access_token: token }));
+      } catch (err) {
+        finish(err, null);
+      }
+    }
+
+    function sendCommand() {
+      try {
+        ws.send(JSON.stringify({ id: requestId, ...command }));
+      } catch (err) {
+        finish(err, null);
+      }
+    }
+
+    ws.on("message", (buf) => {
+      let msg;
+      try {
+        msg = JSON.parse(buf.toString());
+      } catch {
+        return;
+      }
+
+      if (!authed) {
+        if (msg && msg.type === "auth_required") {
+          sendAuth();
+          return;
+        }
+        if (msg && msg.type === "auth_ok") {
+          authed = true;
+          sendCommand();
+          return;
+        }
+        if (msg && msg.type === "auth_invalid") {
+          authAttemptIndex += 1;
+          if (authAttemptIndex >= authTokens.length) {
+            finish(new Error("ha_ws_auth_invalid"), null);
+          } else {
+            sendAuth();
+          }
+          return;
+        }
+        return;
+      }
+
+      if (msg && msg.type === "result" && msg.id === requestId) {
+        if (!msg.success) {
+          const message =
+            msg.error && typeof msg.error === "object" && typeof msg.error.message === "string"
+              ? msg.error.message.trim()
+              : "";
+          finish(new Error(message ? `ha_ws_result_error:${message}` : "ha_ws_result_error"), null);
+          return;
+        }
+        finish(null, msg.result);
+      }
+    });
+
+    ws.on("error", (err) => finish(err, null));
+    ws.on("close", () => finish(new Error("ha_ws_closed"), null));
+  });
+}
+
+function normalizeZhaDeviceRow(row) {
+  if (!row || typeof row !== "object") return null;
+  const ieee = normalizeNonEmptyString(row.ieee);
+  if (!ieee) return null;
+  const name = normalizeNonEmptyString(row.name) || null;
+  const manufacturer = normalizeNonEmptyString(row.manufacturer) || null;
+  const model = normalizeNonEmptyString(row.model) || null;
+  const available = typeof row.available === "boolean" ? row.available : null;
+  return { ieee, name, manufacturer, model, available };
+}
+
+async function listZhaDevicesViaHa() {
+  const result = await callHaWebSocketCommand({ type: "zha/devices" }, 15000);
+  const list = Array.isArray(result) ? result : [];
+  return list.map(normalizeZhaDeviceRow).filter(Boolean);
+}
+
+async function permitZigbeeJoinViaHa(durationSeconds) {
+  const bounded = safeClampInt(durationSeconds, 1, 254) || 60;
+  await callHaServiceViaSupervisor("zha", "permit", { duration: bounded });
+  return bounded;
+}
+
+function classifyZhaError(err) {
+  const raw = String(err && err.message ? err.message : err || "").trim();
+  const message = raw.toLowerCase();
+
+  if (!raw) {
+    return { status: 500, code: "unknown_error", message: "Could not talk to Home Assistant Zigbee right now." };
+  }
+  if (message.includes("supervisor_token_missing")) {
+    return { status: 503, code: "supervisor_token_missing", message: "Dinodia Hub supervisor access is not available." };
+  }
+  if (message.includes("ha_ws_auth_missing") || message.includes("ha_ws_auth_invalid")) {
+    return { status: 503, code: "upstream_auth_failed", message: "Dinodia Hub cannot authenticate with Home Assistant Zigbee right now." };
+  }
+  if (message.includes("ha_ws_timeout") || message.includes("ha_ws_closed")) {
+    return { status: 504, code: "ha_timeout", message: "Home Assistant Zigbee did not respond in time." };
+  }
+  if (message.includes("ha_service_error:404") || message.includes("ha_ws_result_error:unknown command") || message.includes("not found")) {
+    return { status: 400, code: "zha_not_configured", message: "Home Assistant Zigbee is not available on this Dinodia Hub." };
+  }
+  if (message.includes("config entry") || message.includes("zha") && message.includes("not") && message.includes("loaded")) {
+    return { status: 400, code: "zha_not_configured", message: "Home Assistant Zigbee is not available on this Dinodia Hub." };
+  }
+  if (message.includes("ha_service_error")) {
+    return { status: 502, code: "permit_failed", message: "Could not start Zigbee pairing on your Dinodia Hub." };
+  }
+  if (message.includes("ha_ws_result_error")) {
+    return { status: 502, code: "zha_query_failed", message: "Could not read Zigbee devices from your Dinodia Hub." };
+  }
+  return { status: 500, code: "unknown_error", message: "Could not talk to Home Assistant Zigbee right now." };
+}
+
+const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", "http://localhost");
     if (req.method === "GET" && url.pathname === "/_dinodia/sync-status") {
@@ -1244,6 +1482,37 @@ const server = http.createServer((req, res) => {
         hashes: syncedTokenHashes.size,
         hasSyncSecret: Boolean(syncSecret),
       });
+    }
+
+    if (req.method === "POST" && url.pathname === "/_dinodia/zha/permit") {
+      if (!ensureHubAuthorized(req, res)) return;
+      let body = {};
+      try {
+        body = await readJsonBody(req);
+      } catch (err) {
+        return hubError(res, 400, "invalid_json", "Invalid request body.", String(err && err.message ? err.message : err));
+      }
+      const requestedDuration = body && typeof body === "object" ? body.duration : undefined;
+      try {
+        const duration = await permitZigbeeJoinViaHa(requestedDuration);
+        return writeJson(res, 200, { ok: true, duration });
+      } catch (err) {
+        const mapped = classifyZhaError(err);
+        log("warn", "Dinodia Zigbee permit failed", { code: mapped.code, detail: String(err && err.message ? err.message : err) });
+        return hubError(res, mapped.status, mapped.code, mapped.message);
+      }
+    }
+
+    if (req.method === "GET" && url.pathname === "/_dinodia/zha/devices") {
+      if (!ensureHubAuthorized(req, res)) return;
+      try {
+        const devices = await listZhaDevicesViaHa();
+        return writeJson(res, 200, { devices });
+      } catch (err) {
+        const mapped = classifyZhaError(err);
+        log("warn", "Dinodia Zigbee device list failed", { code: mapped.code, detail: String(err && err.message ? err.message : err) });
+        return hubError(res, mapped.status, mapped.code, mapped.message);
+      }
     }
 
     if (!req.url || !req.url.startsWith("/")) return writeJson(res, 400, { error: "Bad request." });
