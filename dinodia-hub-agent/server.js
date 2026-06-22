@@ -1472,21 +1472,16 @@ function classifyZhaError(err) {
   return { status: 500, code: "unknown_error", message: "Could not talk to Home Assistant Zigbee right now." };
 }
 
-async function checkRegistryReadableViaSupervisor() {
-  if (!SUPERVISOR_TOKEN) {
-    return { ok: false, code: "supervisor_token_missing" };
-  }
+async function checkRegistryReadableViaHa() {
   try {
-    const res = await fetch("http://supervisor/core/api/config/device_registry/list", {
-      method: "GET",
-      headers: { authorization: `Bearer ${SUPERVISOR_TOKEN}` },
-    });
-    if (!res.ok) {
-      return { ok: false, code: `registry_http_${res.status}` };
+    const result = await callHaWebSocketCommand({ type: "config/device_registry/list" }, 15000);
+    if (!Array.isArray(result)) {
+      return { ok: false, code: "registry_unexpected_shape" };
     }
     return { ok: true, code: null };
-  } catch {
-    return { ok: false, code: "registry_request_failed" };
+  } catch (err) {
+    const mapped = classifyZhaError(err);
+    return { ok: false, code: mapped.code };
   }
 }
 
@@ -1542,7 +1537,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "GET" && url.pathname === "/_dinodia/zha/health") {
       if (!ensureHubAuthorized(req, res)) return;
       log("info", "Dinodia Zigbee health requested");
-      const registry = await checkRegistryReadableViaSupervisor();
+      const registry = await checkRegistryReadableViaHa();
       try {
         await listZhaDevicesViaHa();
         return writeJson(res, 200, {
