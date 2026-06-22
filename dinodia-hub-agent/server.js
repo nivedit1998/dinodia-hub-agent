@@ -1249,8 +1249,12 @@ function proxyHttpToSupervisorCore(req, res) {
     upstreamUrl,
     { method: req.method, headers: upstreamHeaders },
     (upstreamRes) => {
+      const statusCode = upstreamRes.statusCode || 502;
+      if (statusCode < 200 || statusCode >= 300) {
+        log("warn", "Upstream HTTP non-2xx", { path: clientPath, status: statusCode });
+      }
       const outHeaders = sanitizeHopByHopHeaders(upstreamRes.headers);
-      res.writeHead(upstreamRes.statusCode || 502, outHeaders);
+      res.writeHead(statusCode, outHeaders);
       upstreamRes.pipe(res);
     }
   );
@@ -1468,6 +1472,24 @@ function classifyZhaError(err) {
   return { status: 500, code: "unknown_error", message: "Could not talk to Home Assistant Zigbee right now." };
 }
 
+async function checkRegistryReadableViaSupervisor() {
+  if (!SUPERVISOR_TOKEN) {
+    return { ok: false, code: "supervisor_token_missing" };
+  }
+  try {
+    const res = await fetch("http://supervisor/core/api/config/device_registry/list", {
+      method: "GET",
+      headers: { authorization: `Bearer ${SUPERVISOR_TOKEN}` },
+    });
+    if (!res.ok) {
+      return { ok: false, code: `registry_http_${res.status}` };
+    }
+    return { ok: true, code: null };
+  } catch {
+    return { ok: false, code: "registry_request_failed" };
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", "http://localhost");
@@ -1493,6 +1515,7 @@ const server = http.createServer(async (req, res) => {
         return hubError(res, 400, "invalid_json", "Invalid request body.", String(err && err.message ? err.message : err));
       }
       const requestedDuration = body && typeof body === "object" ? body.duration : undefined;
+      log("info", "Dinodia Zigbee permit requested", { duration: requestedDuration });
       try {
         const duration = await permitZigbeeJoinViaHa(requestedDuration);
         return writeJson(res, 200, { ok: true, duration });
@@ -1505,6 +1528,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/_dinodia/zha/devices") {
       if (!ensureHubAuthorized(req, res)) return;
+      log("info", "Dinodia Zigbee devices requested");
       try {
         const devices = await listZhaDevicesViaHa();
         return writeJson(res, 200, { devices });
@@ -1512,6 +1536,33 @@ const server = http.createServer(async (req, res) => {
         const mapped = classifyZhaError(err);
         log("warn", "Dinodia Zigbee device list failed", { code: mapped.code, detail: String(err && err.message ? err.message : err) });
         return hubError(res, mapped.status, mapped.code, mapped.message);
+      }
+    }
+
+    if (req.method === "GET" && url.pathname === "/_dinodia/zha/health") {
+      if (!ensureHubAuthorized(req, res)) return;
+      log("info", "Dinodia Zigbee health requested");
+      const registry = await checkRegistryReadableViaSupervisor();
+      try {
+        await listZhaDevicesViaHa();
+        return writeJson(res, 200, {
+          hubReachable: true,
+          supervisorTokenPresent: Boolean(SUPERVISOR_TOKEN),
+          registryReadable: registry.ok,
+          registryErrorCode: registry.code,
+          zhaDevicesReadable: true,
+          zhaErrorCode: null,
+        });
+      } catch (err) {
+        const mapped = classifyZhaError(err);
+        return writeJson(res, 200, {
+          hubReachable: true,
+          supervisorTokenPresent: Boolean(SUPERVISOR_TOKEN),
+          registryReadable: registry.ok,
+          registryErrorCode: registry.code,
+          zhaDevicesReadable: false,
+          zhaErrorCode: mapped.code,
+        });
       }
     }
 
