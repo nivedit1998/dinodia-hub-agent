@@ -103,6 +103,44 @@ function isPathAllowed(pathname) {
   return allowedPathRegex.some((re) => re.test(pathname));
 }
 
+function truncateLogText(value, max = 240) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function isExpectedConfigFlow400(args) {
+  const pathName = String(args && args.path ? args.path : "");
+  const method = String(args && args.method ? args.method : "").toUpperCase();
+  const statusCode = Number(args && args.statusCode);
+  const responseBody = String(args && args.responseBody ? args.responseBody : "").toLowerCase();
+  if (statusCode !== 400) return false;
+  if (!pathName.startsWith("/api/config/config_entries/flow/")) return false;
+  if (method !== "POST" && method !== "DELETE") return false;
+  if (!responseBody) return false;
+
+  return [
+    "already configured",
+    "already been configured",
+    "already created",
+    "create_entry",
+    "flow aborted",
+    "flow not found",
+    "no config flow found",
+    "not in progress",
+    "unknown flow",
+    "invalid flow specified",
+    "does not exist",
+    "already finished",
+    "no longer in progress",
+  ].some((token) => responseBody.includes(token));
+}
+
+function classifyUpstreamNon2xx(args) {
+  if (isExpectedConfigFlow400(args)) return "info";
+  return "warn";
+}
+
 function extractBearerTokenFromAuthHeader(value) {
   if (!value) return null;
   const m = String(value).match(/^Bearer\s+(.+)$/i);
@@ -1244,14 +1282,40 @@ function proxyHttpToSupervisorCore(req, res) {
   upstreamHeaders["authorization"] = `Bearer ${SUPERVISOR_TOKEN}`;
 
   const lib = upstreamUrl.protocol === "https:" ? https : http;
+  const isExpectedConfigFlow400 =
+    clientPath.startsWith("/api/config/config_entries/flow/") && clientUrl.search === "";
 
   const upstreamReq = lib.request(
     upstreamUrl,
     { method: req.method, headers: upstreamHeaders },
     (upstreamRes) => {
       const statusCode = upstreamRes.statusCode || 502;
+      const shouldInspectBody = statusCode === 400 && clientPath.startsWith("/api/config/config_entries/flow/");
+      const responseChunks = [];
+      let capturedBytes = 0;
+      const maxCapturedBytes = 4096;
       if (statusCode < 200 || statusCode >= 300) {
-        log("warn", "Upstream HTTP non-2xx", { path: clientPath, status: statusCode });
+        upstreamRes.on("data", (chunk) => {
+          if (!shouldInspectBody || !chunk) return;
+          const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          if (capturedBytes >= maxCapturedBytes) return;
+          const next = buf.slice(0, Math.max(0, maxCapturedBytes - capturedBytes));
+          if (!next.length) return;
+          responseChunks.push(next);
+          capturedBytes += next.length;
+        });
+        upstreamRes.on("end", () => {
+          const responseBody = shouldInspectBody ? Buffer.concat(responseChunks).toString("utf8") : "";
+          const level = classifyUpstreamNon2xx({
+            path: clientPath,
+            method: req.method,
+            statusCode,
+            responseBody,
+          });
+          const extra = { path: clientPath, status: statusCode };
+          if (level === "warn" && responseBody) extra.body = truncateLogText(responseBody);
+          log(level, "Upstream HTTP non-2xx", extra);
+        });
       }
       const outHeaders = sanitizeHopByHopHeaders(upstreamRes.headers);
       res.writeHead(statusCode, outHeaders);
