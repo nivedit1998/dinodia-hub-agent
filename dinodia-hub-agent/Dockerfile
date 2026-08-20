@@ -1,3 +1,5 @@
+# Architecture: Home Assistant builds this image from the add-on base and runs
+# server.js as the local HTTP/WebSocket bridge. It is not the platform runtime.
 ARG BUILD_FROM=ghcr.io/hassio-addons/base:14.0.6
 FROM ${BUILD_FROM}
 

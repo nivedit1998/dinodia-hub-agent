@@ -1,3 +1,10 @@
+<!--
+Architecture map: this repository packages the local Dinodia Hub Agent as a Home
+Assistant add-on. Its HTTP/WebSocket bridge talks to HA Core on the hub; optional
+platform sync calls the primary/AWS-compatible /api/hub-agent endpoints so the
+cloud can rotate accepted hub-token hashes. The platform owns pairing state and
+the Hub Agent owns local proxying; live customer hubs must not be used for tests.
+-->
 # Dinodia Hub Agent (Home Assistant add-on)
 
 ## Status (as of 2026-03-17)

@@ -1,3 +1,5 @@
+# Architecture: Home Assistant reads this repository as the add-on source; the
+# runtime bridge itself lives under dinodia-hub-agent/.
 name: Dinodia Hub Agent Add-ons
 url: https://github.com/nivedit1998/dinodia-hub-agent
 maintainer: Dinodia Smart Living

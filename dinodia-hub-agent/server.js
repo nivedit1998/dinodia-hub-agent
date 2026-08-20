@@ -1,3 +1,11 @@
+/*
+ * Architecture: long-running Home Assistant add-on process. Local HTTP and
+ * WebSocket clients authenticate with hub tokens, then this bridge proxies the
+ * allowed HA/Supervisor operations. The optional sync loop calls the platform's
+ * /api/hub-agent/pair and /api/hub-agent/token-state contract; it is deliberately
+ * separate from the Cloudflare edge worker and from the public iOS/Alexa clients.
+ */
+
 const fs = require("fs");
 const http = require("http");
 const https = require("https");

@@ -1,2 +1,4 @@
 #!/usr/bin/with-contenv sh
+# Architecture: s6-overlay entrypoint for the add-on container; it starts the
+# local bridge process defined in server.js after Home Assistant injects config.
 exec node /opt/dinodia-hub-agent/server.js

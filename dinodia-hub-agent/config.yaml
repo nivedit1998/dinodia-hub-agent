@@ -1,3 +1,6 @@
+# Architecture: add-on configuration for the local HA bridge. Platform URL,
+# hub identity and sync settings connect this process to the cloud token-state
+# contract; secret values are supplied by the installer/UI and are never written into source.
 name: Dinodia Hub Agent
 slug: dinodia-hub-agent
 version: "0.4.16"
