@@ -1,3 +1,4 @@
+<!-- Architecture: Dinodia Hub Agent module README.md; runs on the Home Assistant add-on and bridges authenticated local HA operations with the platform hub/token-state contract. -->
 <!--
 Architecture map: this repository packages the local Dinodia Hub Agent as a Home
 Assistant add-on. Its HTTP/WebSocket bridge talks to HA Core on the hub; optional
