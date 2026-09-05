@@ -12,6 +12,7 @@ const https = require("https");
 const crypto = require("crypto");
 const path = require("path");
 const { WebSocketServer, WebSocket } = require("ws");
+const { ElectricUsageTracker, stateClass: classifyElectricState } = require("./electricUsageTracker");
 
 const OPTIONS_PATH = process.env.DINODIA_OPTIONS_PATH || "/data/options.json";
 const TOKEN_STATE_PATH = process.env.DINODIA_TOKEN_STATE_PATH || "/data/dinodia_token_state.json";
@@ -74,6 +75,14 @@ function loadOptions() {
     heating_usage_label_refresh_minutes: 30,
     heating_usage_gap_unknown_after_seconds: 600,
     heating_usage_poll_interval_seconds: 300,
+
+    electric_usage_tracking_enabled: true,
+    electric_usage_tracking_label: "Light",
+    electric_usage_persist_path: "/data/electric_usage_state.json",
+    electric_usage_max_tracked_entities: 200,
+    electric_usage_poll_interval_seconds: 300,
+    electric_usage_label_refresh_minutes: 5,
+    electric_usage_gap_unknown_after_seconds: 600,
 
     ha_area_snapshot_refresh_minutes: 10,
   };
@@ -188,6 +197,13 @@ const HEATING_SCHEMA_VERSION = 2;
 const heatingUsageStatePath =
   String(HEATING_USAGE_STATE_PATH_ENV || opts.heating_usage_persist_path || "").trim() ||
   "/data/heating_usage_state.json";
+
+const electricUsageTracker = new ElectricUsageTracker({
+  persistPath: process.env.DINODIA_ELECTRIC_USAGE_STATE_PATH || opts.electric_usage_persist_path,
+  maxTrackedEntities: opts.electric_usage_max_tracked_entities,
+  unknownGapAfterSeconds: opts.electric_usage_gap_unknown_after_seconds,
+  logger: { warn: (message) => log("warn", message), error: (message) => log("error", message) },
+});
 
 const DEFAULT_EFFICIENCY_BAND = "B";
 const DEFAULT_EFFICIENCY_BANDS_VERSION = 1;
@@ -1076,6 +1092,9 @@ async function syncFromPlatformOnce() {
       payload.heatingUsageResetAckAt = heatingUsageState.lastResetAt.trim();
     }
 
+    const electricResetAckAt = electricUsageTracker.resetAcknowledgement();
+    if (!payload.heatingUsageResetAckAt && electricResetAckAt) payload.heatingUsageResetAckAt = electricResetAckAt;
+
     const dirtyDevices = listDirtyHeatingUsageDevices(100);
     if (dirtyDevices.length > 0) {
       payload.heatingUsage = {
@@ -1084,6 +1103,8 @@ async function syncFromPlatformOnce() {
         devices: dirtyDevices,
       };
     }
+    const electricUsage = electricUsageTracker.payload();
+    if (electricUsage) payload.electricUsage = electricUsage;
 
     const haAreas = await getHaAreaRegistrySnapshotMaybe();
     if (haAreas) payload.haAreas = haAreas;
@@ -1130,6 +1151,7 @@ async function syncFromPlatformOnce() {
         const currentMs = current ? new Date(current).getTime() : NaN;
         if (!Number.isFinite(currentMs) || nextMs > currentMs) {
           resetHeatingUsageState(resetAt);
+          electricUsageTracker.applyReset(resetAt);
         }
       }
     }
@@ -1157,6 +1179,8 @@ async function syncFromPlatformOnce() {
     if (dirtyDevices.length > 0) {
       clearDirtyHeatingUsageDevices(dirtyDevices.map((d) => d.entityId));
     }
+    if (electricUsage?.devices) electricUsageTracker.acknowledgeUploaded(electricUsage.devices);
+    if (electricResetAckAt) electricUsageTracker.acknowledgeReset(electricResetAckAt);
 
     log("info", "Platform sync updated tokens", { hashes: syncedTokenHashes.size, agentSeenVersion });
   } catch (err) {
@@ -1570,6 +1594,7 @@ const server = http.createServer(async (req, res) => {
         agentSeenVersion,
         hashes: syncedTokenHashes.size,
         hasSyncSecret: Boolean(syncSecret),
+        electricUsage: electricUsageTracker.status(),
       });
     }
 
@@ -1668,8 +1693,10 @@ function pickUpstreamAuthTokens() {
 }
 
 function startHeatingUsageTracker() {
-  if (!opts.heating_usage_tracking_enabled) {
-    log("info", "Heating usage tracking disabled");
+  const heatingEnabled = opts.heating_usage_tracking_enabled !== false;
+  const electricEnabled = opts.electric_usage_tracking_enabled !== false;
+  if (!heatingEnabled && !electricEnabled) {
+    log("info", "Heating and electric usage tracking disabled");
     return;
   }
 
@@ -1685,6 +1712,10 @@ function startHeatingUsageTracker() {
   const pollEveryMs = (Number.isFinite(pollSecs) ? Math.floor(pollSecs) : 300) * 1000;
   const pollIntervalMs = Math.min(60 * 60 * 1000, Math.max(60 * 1000, pollEveryMs || 300 * 1000));
 
+  const electricLabel = String(opts.electric_usage_tracking_label || "Light").trim() || "Light";
+  const electricRefreshEveryMs = Math.max(60 * 1000, (Number(opts.electric_usage_label_refresh_minutes) || 5) * 60 * 1000);
+  const electricPollIntervalMs = Math.min(60 * 60 * 1000, Math.max(60 * 1000, (Number(opts.electric_usage_poll_interval_seconds) || 300) * 1000));
+
   const upstreamUrl = "ws://supervisor/core/api/websocket";
   const upstreamAuthTokens = pickUpstreamAuthTokens();
 
@@ -1698,10 +1729,79 @@ function startHeatingUsageTracker() {
   const pending = new Map(); // id -> { resolve, reject, timeout }
 
   let entityLabelById = new Map(); // entity_id -> "Boiler" | "Radiator"
+  let electricEntityById = new Map(); // entity_id -> stable identity/area metadata
   const entityLastProcessedAtMs = new Map(); // entity_id -> epoch ms
-  let lastRegistryRefreshAtMs = 0;
+  let lastHeatingRegistryRefreshAtMs = 0;
+  let lastElectricRegistryRefreshAtMs = 0;
   let pollTimer = null;
   let pollInProgress = false;
+
+  async function refreshElectricRegistryIfNeeded(force = false) {
+    if (!electricEnabled || !upstreamAuthed) return;
+    const nowMs = Date.now();
+    if (!force && nowMs - lastElectricRegistryRefreshAtMs < electricRefreshEveryMs) return;
+    try {
+      const [labelsResp, entitiesResp, devicesResp, areasResp] = await Promise.all([
+        request("config/label_registry/list"),
+        request("config/entity_registry/list"),
+        request("config/device_registry/list"),
+        request("config/area_registry/list"),
+      ]);
+      const labelNameById = new Map();
+      for (const row of Array.isArray(labelsResp?.result) ? labelsResp.result : []) {
+        const id = String(row?.label_id || "").trim();
+        const name = String(row?.name || "").trim();
+        if (id && name) labelNameById.set(id, name);
+      }
+      const deviceById = new Map();
+      for (const row of Array.isArray(devicesResp?.result) ? devicesResp.result : []) {
+        const id = String(row?.id || "").trim();
+        if (id) deviceById.set(id, row);
+      }
+      const areaNameById = new Map();
+      for (const row of Array.isArray(areasResp?.result) ? areasResp.result : []) {
+        const id = String(row?.area_id || "").trim();
+        const name = String(row?.name || "").trim();
+        if (id && name) areaNameById.set(id, name);
+      }
+      const next = new Map();
+      for (const row of Array.isArray(entitiesResp?.result) ? entitiesResp.result : []) {
+        const entityId = String(row?.entity_id || "").trim();
+        if (!/^(light|switch)\./i.test(entityId) || row?.disabled_by || row?.hidden_by) continue;
+        const device = deviceById.get(String(row?.device_id || "").trim());
+        const labelsForEntity = Array.isArray(row?.labels) ? row.labels : [];
+        const labelsForDevice = Array.isArray(device?.labels) ? device.labels : [];
+        const labelNames = [...labelsForEntity, ...labelsForDevice].map((id) => labelNameById.get(String(id)) || "");
+        if (!labelNames.some((name) => name.trim().toLowerCase() === electricLabel.toLowerCase())) continue;
+        const areaId = String(row?.area_id || device?.area_id || "").trim() || null;
+        next.set(entityId, {
+          entityId,
+          entityName: String(row?.name || row?.original_name || entityId).trim() || entityId,
+          areaId,
+          areaName: areaId ? (areaNameById.get(areaId) || null) : null,
+        });
+      }
+      for (const entityId of electricEntityById.keys()) if (!next.has(entityId)) electricUsageTracker.retire(entityId);
+      electricEntityById = next;
+      lastElectricRegistryRefreshAtMs = nowMs;
+      log("info", "Electric usage registry refreshed", { entities: next.size });
+    } catch (err) {
+      log("warn", "Electric usage registry refresh failed", String(err && err.message ? err.message : err));
+    }
+  }
+
+  async function observeElectricState(entityId, state, observedAtIso) {
+    if (!electricEnabled) return;
+    const metadata = electricEntityById.get(entityId);
+    if (!metadata || !state || typeof state !== "object") return;
+    const observedAt = new Date(observedAtIso);
+    if (!Number.isFinite(observedAt.getTime())) return;
+    if (!observedAt) return;
+    electricUsageTracker.observe({
+      ...metadata,
+      classification: classifyElectricState(state.state, state.state !== "unavailable" && state.state !== "unknown"),
+    }, observedAt);
+  }
 
   function clearPending(err) {
     for (const [id, p] of pending.entries()) {
@@ -1748,10 +1848,10 @@ function startHeatingUsageTracker() {
   }
 
   async function refreshLabelEntityRegistryIfNeeded(force = false) {
-    if (!upstreamAuthed) return;
+    if (!heatingEnabled || !upstreamAuthed) return;
     const nowMs = Date.now();
-    if (!force && nowMs - lastRegistryRefreshAtMs < refreshEveryMs) return;
-    lastRegistryRefreshAtMs = nowMs;
+    if (!force && nowMs - lastHeatingRegistryRefreshAtMs < refreshEveryMs) return;
+    lastHeatingRegistryRefreshAtMs = nowMs;
 
     try {
       const labelsResp = await request("config/label_registry/list");
@@ -1842,6 +1942,14 @@ function startHeatingUsageTracker() {
   function handleStateChangedEvent(event) {
     const entityId = event?.data?.entity_id;
     if (typeof entityId !== "string" || !entityId.trim()) return;
+    const newState = event?.data?.new_state;
+    if (electricEnabled && electricEntityById.has(entityId) && newState && typeof newState === "object") {
+      const observedAtIso =
+        typeof event.time_fired === "string" && event.time_fired ? event.time_fired :
+        typeof newState.last_updated === "string" && newState.last_updated ? newState.last_updated :
+        new Date().toISOString();
+      observeElectricState(entityId, newState, observedAtIso).catch((error) => log("warn", "Electric usage state update failed", String(error?.message || error)));
+    }
     const label = entityLabelById.get(entityId);
     if (!label) return;
 
@@ -1850,7 +1958,6 @@ function startHeatingUsageTracker() {
     if (minProcessIntervalMs > 0 && nowMs - lastMs < minProcessIntervalMs) return;
     entityLastProcessedAtMs.set(entityId, nowMs);
 
-    const newState = event?.data?.new_state;
     if (!newState || typeof newState !== "object") return;
 
     const observedAtIso =
@@ -1883,6 +1990,7 @@ function startHeatingUsageTracker() {
   function startSubscriptions() {
     const kick = async () => {
       await refreshLabelEntityRegistryIfNeeded(true);
+      await refreshElectricRegistryIfNeeded(true);
 
       // Seed current state once so platform tables populate immediately after install/upgrade,
       // even before the first state_changed event arrives.
@@ -1941,6 +2049,17 @@ function startHeatingUsageTracker() {
         log("info", "Heating usage seeded initial entity states", { entities: initialEntries.length });
       }
 
+      if (electricEnabled && electricEntityById.size > 0) {
+        const electricEntries = Array.from(electricEntityById.keys());
+        for (const entityId of electricEntries) {
+          const state = await getStateFromSupervisor(entityId);
+          if (!state || typeof state !== "object") continue;
+          const observedAtIso = typeof state.last_updated === "string" && state.last_updated ? state.last_updated : new Date().toISOString();
+          await observeElectricState(entityId, state, observedAtIso);
+        }
+        log("info", "Electric usage seeded initial entity states", { entities: electricEntries.length });
+      }
+
       // Subscribe to state changes (we filter locally by labeled entity id).
       await request("subscribe_events", { event_type: "state_changed" });
 
@@ -1957,7 +2076,7 @@ function startHeatingUsageTracker() {
           pollInProgress = true;
           try {
             const entries = Array.from(entityLabelById.entries());
-            if (entries.length === 0) return;
+            if (entries.length === 0 && electricEntityById.size === 0) return;
 
             for (const [entityId, label] of entries) {
               if (!upstreamAuthed) break;
@@ -1984,6 +2103,15 @@ function startHeatingUsageTracker() {
 
               updateLocalAccumulator(entityId, label, observedAtIso, classification, processedSnapshot);
             }
+
+            if (electricEnabled) {
+              for (const entityId of electricEntityById.keys()) {
+                if (!upstreamAuthed) break;
+                const state = await getStateFromSupervisor(entityId);
+                if (!state || typeof state !== "object") continue;
+                await observeElectricState(entityId, state, new Date().toISOString());
+              }
+            }
           } catch (err) {
             log("warn", "Heating usage poll loop failed", String(err && err.message ? err.message : err));
           } finally {
@@ -2005,7 +2133,9 @@ function startHeatingUsageTracker() {
 
     const refreshLoop = () => {
       refreshLabelEntityRegistryIfNeeded(false).catch(() => {});
-      const t = setTimeout(refreshLoop, refreshEveryMs);
+      refreshElectricRegistryIfNeeded(false).catch(() => {});
+      const refreshDelay = electricEnabled ? Math.min(refreshEveryMs, electricRefreshEveryMs) : refreshEveryMs;
+      const t = setTimeout(refreshLoop, refreshDelay);
       if (t && typeof t.unref === "function") t.unref();
     };
     const t0 = setTimeout(refreshLoop, 10000);

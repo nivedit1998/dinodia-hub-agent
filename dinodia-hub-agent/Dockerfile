@@ -11,6 +11,7 @@ COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev || npm install --omit=dev
 
 COPY server.js ./
+COPY electricUsageTracker.js ./
 COPY rootfs/ /
 
 RUN chmod +x /etc/services.d/dinodia-hub-agent/run

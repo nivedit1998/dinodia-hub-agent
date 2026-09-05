@@ -9,7 +9,7 @@ the Hub Agent owns local proxying; live customer hubs must not be used for tests
 # Dinodia Hub Agent (Home Assistant add-on)
 
 ## Status (as of 2026-03-17)
-- ✅ Complete: This README documents installation and the current add-on options.
+- ✅ Complete: this add-on also tracks Light-labelled ON/OFF/UNKNOWN runtime for the homeowner Electric dashboard.
 
 Home Assistant add-on that provides an authenticated HTTP/WS bridge to HA Core for Dinodia hubs, plus periodic platform sync.
 
@@ -33,6 +33,10 @@ Home Assistant add-on that provides an authenticated HTTP/WS bridge to HA Core f
 - `ws_auth_mode`: `auto` (default), `supervisor`, or `ha`
 - `ha_access_token`: optional HA token if using `ws_auth_mode: ha`
 - `log_level`: `info` by default; use `warn` or `error` for minimal operational logs
+- `electric_usage_tracking_enabled`: enable Light runtime tracking (default `true`)
+- `electric_usage_persist_path`: persistent tracker state (default `/data/electric_usage_state.json`)
+- `electric_usage_poll_interval_seconds`: fallback state poll interval (default `300`)
+- `electric_usage_label_refresh_minutes`: registry refresh interval (default `5`)
 
 ## Notes
 - Tested base images: `ghcr.io/hassio-addons/base:14.0.6`
@@ -40,4 +44,5 @@ Home Assistant add-on that provides an authenticated HTTP/WS bridge to HA Core f
 - LAN reporting: the agent reports the detected LAN base URL to the platform (if platform sync is enabled).
 - Secure logging: info logs avoid LAN URL details; set `log_level: warn` for stricter output.
 - Local smoke testing: you can override add-on file paths with `DINODIA_OPTIONS_PATH` and `DINODIA_TOKEN_STATE_PATH` (defaults remain `/data/options.json` and `/data/dinodia_token_state.json`).
+- Light runtime state is persisted by the add-on and uploaded only in the signed platform heartbeat; raw HA events are not stored in HA Recorder.
 # dinodia-hub-agent
